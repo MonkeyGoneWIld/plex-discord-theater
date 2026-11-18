@@ -46,7 +46,7 @@ export function Logs({ onError }: { onError: (e: unknown) => void }) {
     <>
       <div className="page-head">
         <h1>Logs</h1>
-        <p className="muted">The server's log files, newest first, including lines reported by viewers' players. Times are in your local time ({zoneLabel()}); each file holds one day in UTC.</p>
+        <p className="muted">Server log files, newest first, including entries reported by viewers' players. Times are shown in your local time zone ({zoneLabel()}); each file covers one UTC day.</p>
       </div>
     <section className="card">
       <form className="toolbar" onSubmit={(e) => { e.preventDefault(); void load(); }}>
@@ -95,7 +95,7 @@ export function Logs({ onError }: { onError: (e: unknown) => void }) {
           <div key={l.n} className={`log-line ${l.level}`}>
             <span className="log-time">{timeOfDay(l.at)}</span>
             <span className="log-tag">{l.tag ?? ""}</span>
-            <span className="log-text">{l.client && <span className="log-client" title="Reported by a viewer's player">player {l.client}</span>}{l.text}</span>
+            <span className="log-text">{l.client && <span className="log-client">Player {l.client}</span>}{l.text}</span>
           </div>
         ))}
         {result && result.lines.length === 0 && <p className="empty">No log lines match these filters.</p>}

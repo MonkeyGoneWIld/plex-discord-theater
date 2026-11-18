@@ -82,7 +82,7 @@ export function Avatar({ name, id, size = 24 }: { name: string | null; id: strin
   for (const c of id) h = (h * 31 + c.charCodeAt(0)) % 360;
   const letter = (name ?? "?").trim().charAt(0).toUpperCase() || "?";
   return (
-    <span className="avatar" title={name ?? id} aria-hidden="true"
+    <span className="avatar" aria-hidden="true"
       style={{ width: size, height: size, fontSize: Math.round(size * 0.46), background: `hsl(${h} 42% 38%)` }}>
       {letter}
     </span>
@@ -106,7 +106,7 @@ export function FlowChart({ points, requiredBps, height = 150, stepS = 10 }: {
 }) {
   const [hover, setHover] = useState<number | null>(null);
   if (points.length < 2) {
-    return <div className="flow-empty" style={{ height }}>Collecting data. Players report what they received every 10 seconds.</div>;
+    return <div className="flow-empty" style={{ height }}>Collecting data…</div>;
   }
   const totals = points.map((p) => p[1] + p[2] + p[3]);
   const max = Math.max(1e6, requiredBps ?? 0, ...totals) * 1.15;
@@ -184,5 +184,46 @@ export function Stat({ icon, label, value, sub, tone, children }: {
       {sub && <div className="stat-sub">{sub}</div>}
       {children}
     </div>
+  );
+}
+
+/** One viewer's player sending another's, peer to peer. */
+export interface ShareRow { from: string; to: string; bytes: number; fromName?: string | null; toName?: string | null }
+
+/**
+ * Who sent whom what, peer to peer: one row for each sender and recipient,
+ * most first, with a bar for the amount. Peers keep their colour from SOURCES.
+ */
+export function ShareList({ shares, nameOf, limit = 10, empty = "No data has been shared between viewers." }: {
+  shares: ShareRow[];
+  nameOf?: (id: string) => string;
+  limit?: number;
+  empty?: string;
+}) {
+  if (shares.length === 0) return <p className="muted small">{empty}</p>;
+  const max = Math.max(...shares.map((s) => s.bytes));
+  const name = (id: string, known?: string | null) => known ?? nameOf?.(id) ?? id;
+  const person = (id: string, known?: string | null) => (
+    <a className="share-person" href={`#people/${id}`}><Avatar id={id} name={name(id, known)} size={20} /><span>{name(id, known)}</span></a>
+  );
+  return (
+    <>
+      <ol className="bars shares" aria-label="Data shared between viewers">
+        {shares.slice(0, limit).map((s) => (
+          <li key={`${s.from}|${s.to}`}>
+            <div className="bar-row share-row">
+              <span className="share-pair">
+                {person(s.from, s.fromName)}
+                <span className="share-arrow" aria-label="sent to">→</span>
+                {person(s.to, s.toName)}
+              </span>
+              <span className="bar-track"><span className="bar-fill" style={{ width: `${max > 0 ? (s.bytes / max) * 100 : 0}%`, background: SOURCES[2].color }} /></span>
+              <span className="bar-value">{bytes(s.bytes)}</span>
+            </div>
+          </li>
+        ))}
+      </ol>
+      {shares.length > limit && <p className="muted small">{shares.length - limit} more not shown.</p>}
+    </>
   );
 }

@@ -47,6 +47,8 @@ const SEEK_LOAD_BEFORE_MS = 1_000;
 const SEEK_LOAD_AFTER_MS = 3_000;
 /** A viewer following the host onto a stream this soon after the host moved followed them. */
 const HOST_MOVE_MS = 15_000;
+/** Players whose key is remembered, for who sent whom what: the most recent kept. */
+const MAX_PEER_KEYS = 500;
 /** How often the room's position in the title is written down, for the session's charts. */
 const POSITION_EVERY_MS = 10_000;
 /** A player that has said nothing for this long says nothing of how it is now. */
@@ -76,6 +78,8 @@ interface ViewerTotals {
   watchedS: number;
   httpBytes: number;
   p2pBytes: number;
+  /** What their player sent to other viewers' players. */
+  upBytes: number;
   edgeBytes: number;
   edgeHitBytes: number;
   stalls: number;
@@ -92,6 +96,8 @@ interface StreamRow {
   offsetS: number;
   peak: number;
   ended: boolean;
+  /** How many were on it at the last look: none, and its end is nobody's loss. */
+  lastViewers: number;
 }
 
 interface OpenPlay {
@@ -113,6 +119,10 @@ interface OpenPlay {
   viewers: Map<string, ViewerTotals>;
   /** What its players have had, at each look: for the dashboard's live graph. */
   flow: FlowSample[];
+  /** Whether a player has said the title reached its end: said once. */
+  reachedEnd: boolean;
+  /** What each viewer's player sent another's, by "from|to": for Now Playing. */
+  shares: Map<string, number>;
 }
 
 /** Everything a play's players have had by one moment, by where it came from. */
@@ -180,6 +190,8 @@ interface RoomSnap {
   waitSwitching: string | null;
   /** The host's last move to another stream: those on theirs follow. */
   hostMove: { at: number; name: string | null; from: string; to: string; why: string | null } | null;
+  /** The host's last change of subtitles: those following the host's change with them. */
+  hostSubtitle: { at: number; name: string | null; from: number; to: number } | null;
 }
 
 /** A stream's tracks, without what makes it somebody's own: "135844:0". */
@@ -192,6 +204,10 @@ interface PlayerState {
   http: number;
   edge: number;
   edgeHit: number;
+  /** What it has sent to other players, in all and to each by their player key; and of that, what was put down to whom. */
+  up: number;
+  upTo: Map<string, number>;
+  upCredited: Map<string, number>;
   sampled: boolean;
   waitingSince: number | null;
   waitingAfterSeek: boolean;
@@ -363,6 +379,14 @@ CREATE TABLE IF NOT EXISTS traffic (
   streams INTEGER NOT NULL DEFAULT 0,
   feed_kbps INTEGER NOT NULL DEFAULT 0
 );
+-- What one viewer's player sent another's in a play.
+CREATE TABLE IF NOT EXISTS play_shares (
+  play_id INTEGER NOT NULL,
+  from_user TEXT NOT NULL,
+  to_user TEXT NOT NULL,
+  bytes INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (play_id, from_user, to_user)
+);
 -- Discord servers' and channels' names.
 CREATE TABLE IF NOT EXISTS places (
   id TEXT PRIMARY KEY,
@@ -413,6 +437,8 @@ export class Recorder {
   private readonly userRoom = new Map<string, string>();
   private readonly names = new Map<string, { username: string | null; written: number }>();
   private readonly launched = new Set<string>();
+  /** Whose each player is, by the key its peer id starts with: for who sent whom what. */
+  private readonly peerKeys = new Map<string, string>();
   private timer: NodeJS.Timeout | null = null;
   private closed = false;
 
@@ -425,6 +451,11 @@ export class Recorder {
     this.db = new Database(opts.dbPath);
     this.db.pragma("journal_mode = WAL");
     this.db.exec(SCHEMA);
+    // Columns added since the tables were first made.
+    const has = (table: string, col: string) =>
+      (this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).some((c) => c.name === col);
+    if (!has("plays", "end_cause")) this.db.exec("ALTER TABLE plays ADD COLUMN end_cause TEXT");
+    if (!has("play_viewers", "up_bytes")) this.db.exec("ALTER TABLE play_viewers ADD COLUMN up_bytes INTEGER NOT NULL DEFAULT 0");
     if (Number(this.db.pragma("user_version", { simple: true })) < 2) this.db.transaction(() => mendHistory(this.db))();
     this.db.pragma("user_version = 2");
     // A play the last run never saw end ended where it was last seen.
@@ -526,7 +557,8 @@ export class Recorder {
   private observeRoom(room: RoomView, at: number): void {
     let snap = this.snaps.get(room.id);
     if (!snap) {
-      snap = { clients: new Map(), ever: new Set(), playId: null, waitingSince: null, waitWhy: null, waitSwitching: null, hostMove: null };
+      snap = { clients: new Map(), ever: new Set(), playId: null, waitingSince: null, waitWhy: null, waitSwitching: null, hostMove: null,
+        hostSubtitle: null };
       this.snaps.set(room.id, snap);
     }
     let play = this.open.get(room.id) ?? null;
@@ -589,6 +621,11 @@ export class Recorder {
       && host.variantKey !== hostBefore.variantKey) {
       snap.hostMove = { at, name: host.username, from: hostBefore.variantKey!, to: host.variantKey, why: room.switching ?? snap.waitSwitching };
     }
+    // And the host's subtitles, which those on the host's choice follow without a stream of their own.
+    if (host && hostBefore?.connected && sameTitle && hostBefore.variantKey && ofTitle(hostBefore.variantKey)
+      && host.subtitleStreamId !== hostBefore.subtitleStreamId) {
+      snap.hostSubtitle = { at, name: host.username, from: hostBefore.subtitleStreamId, to: host.subtitleStreamId };
+    }
     const now = new Map<string, ClientSnap>();
     for (const c of room.clients) {
       const cur: ClientSnap = {
@@ -635,7 +672,13 @@ export class Recorder {
       }
       // Subtitles they start on, with their first stream, are no change either.
       if (!carried && prev.variantKey && c.subtitleStreamId !== prev.subtitleStreamId) {
-        changed("subtitles", prev.subtitleStreamId, c.subtitleStreamId);
+        // The host's change, carried to those following the host's subtitles.
+        const hs = snap.hostSubtitle;
+        const followed = !!hs && c.role !== "host" && at - hs.at <= HOST_MOVE_MS && c.subtitleStreamId === hs.to;
+        this.event(play, room.id, at, "subtitles", c.userId, c.username, room.positionS, {
+          from: prev.subtitleStreamId, to: c.subtitleStreamId,
+          ...(c.role === "host" ? { byHost: true } : followed ? { host: hs.name ?? "the host" } : {}),
+        });
       }
       if (c.quality !== prev.quality) changed("quality", prev.quality, c.quality);
       if (c.role !== prev.role) changed("role", prev.role, c.role);
@@ -665,7 +708,10 @@ export class Recorder {
     // session is a restart, not an end and a start.
     const gone = new Map<string, { sessionId: string; row: StreamRow }>();
     for (const [sessionId, row] of play.streams) {
-      if (row.ended || liveIds.has(sessionId)) continue;
+      if (row.ended || liveIds.has(sessionId)) {
+        if (!row.ended) row.lastViewers = live.find((s) => s.hlsSessionId === sessionId)?.viewers.length ?? row.lastViewers;
+        continue;
+      }
       row.ended = true;
       this.st("UPDATE play_streams SET ended_at = ? WHERE id = ?").run(at, row.id);
       gone.set(row.variantKey, { sessionId, row });
@@ -686,7 +732,7 @@ export class Recorder {
           s.ownerUserId ? this.nameOf(s.ownerUserId) : null, room.positionS, this.streamDetail(s, before?.sessionId));
         play.streams.set(s.hlsSessionId, {
           id, eventId, variantKey: s.variantKey, notesAt: s.notesAt, offsetS: s.sessionOffset,
-          peak: s.viewers.length, ended: false,
+          peak: s.viewers.length, ended: false, lastViewers: s.viewers.length,
         });
         continue;
       }
@@ -714,8 +760,13 @@ export class Recorder {
         this.st("UPDATE play_streams SET peak_viewers = ? WHERE id = ?").run(known.peak, known.id);
       }
     }
-    for (const [variantKey, { sessionId }] of gone) {
-      this.event(play, room.id, at, "stream ended", null, null, room.positionS, { variant: variantKey, session: sessionId });
+    for (const [variantKey, { sessionId, row }] of gone) {
+      // Why: the host moving everybody on it to another, or nobody left on it.
+      const move = this.snaps.get(room.id)?.hostMove;
+      const why = move && move.from === variantKey && at - move.at <= HOST_MOVE_MS
+        ? { host: move.name ?? "the host", ...(move.why ? { switching: move.why } : {}) }
+        : row.lastViewers === 0 ? { unwatched: true } : {};
+      this.event(play, room.id, at, "stream ended", null, null, room.positionS, { variant: variantKey, session: sessionId, ...why });
     }
   }
 
@@ -734,10 +785,13 @@ export class Recorder {
   }
 
   private ensurePlay(roomId: string, ratingKey: string, title: string | null, posS: number, at: number,
-    room?: RoomView): OpenPlay {
+    room?: RoomView, next?: { by: string | null; cause?: string | null; askedBy?: string | null }): OpenPlay {
     const open = this.open.get(roomId);
     if (open && open.ratingKey === ratingKey) return open;
-    if (open) this.closePlay(roomId, at, "another title", null);
+    if (open) {
+      this.closePlay(roomId, at, "another title", next?.by ?? null,
+        { next: title, ...(next?.cause ? { cause: next.cause } : {}), ...(next?.askedBy ? { askedBy: next.askedBy } : {}) });
+    }
     const inst = this.instances().get(roomId);
     const guildId = room?.discord.guildId ?? inst?.guildId ?? null;
     const channelId = room?.discord.channelId ?? inst?.channelId ?? null;
@@ -748,21 +802,32 @@ export class Recorder {
       .run(roomId, ratingKey, title, guildId, channelId, hostUserId, at, at, posS, posS).lastInsertRowid);
     const play: OpenPlay = {
       id, ratingKey, events: 0, errorEvents: 0, playedS: 0, peak: 0, lastTick: at, startedAt: at, playAt: 0, seekAt: 0,
-      posAt: 0, posPlaying: null, streams: new Map(), viewers: new Map(), flow: [],
+      posAt: 0, posPlaying: null, streams: new Map(), viewers: new Map(), flow: [], reachedEnd: false, shares: new Map(),
     };
     this.open.set(roomId, play);
     return play;
   }
 
-  private closePlay(roomId: string, at: number, reason: string, by: string | null): void {
+  /**
+   * The end of a play, and why: `reason` is what ended it (stopped, another
+   * title, room closed), and `more` what the player said of it — its cause
+   * ("finished", "next episode"), the next title, who asked for it.
+   */
+  private closePlay(roomId: string, at: number, reason: string, by: string | null,
+    more: { cause?: string | null; next?: string | null; askedBy?: string | null } = {}): void {
     const play = this.open.get(roomId);
     if (!play) return;
     this.flushViewers(play);
     this.st("UPDATE play_streams SET ended_at = ? WHERE play_id = ? AND ended_at IS NULL").run(at, play.id);
-    this.st("UPDATE plays SET ended_at = ?, updated_at = ?, end_reason = ?, end_by = ?, played_s = ? WHERE id = ?")
-      .run(at, at, reason, by, play.playedS, play.id);
+    // A stop of a title that reached its end is its finishing, whatever the host pressed after.
+    const cause = more.cause ?? (reason === "stopped" && play.reachedEnd ? "finished" : null);
+    this.st("UPDATE plays SET ended_at = ?, updated_at = ?, end_reason = ?, end_by = ?, end_cause = ?, played_s = ? WHERE id = ?")
+      .run(at, at, reason, by, cause, play.playedS, play.id);
     play.events = 0; // the end is always written
-    this.event(play, roomId, at, "ended", null, by, null, { reason });
+    this.event(play, roomId, at, "ended", null, by, null, {
+      reason, ...(cause ? { cause } : {}), ...(more.next ? { next: more.next } : {}), ...(more.askedBy ? { askedBy: more.askedBy } : {}),
+      ...(play.reachedEnd ? { reachedEnd: true } : {}),
+    });
     this.open.delete(roomId);
   }
 
@@ -774,7 +839,7 @@ export class Recorder {
       .run(play.id, c.userId, c.username, c.role, at, at);
     let v = play.viewers.get(c.userId);
     if (!v) {
-      v = { joinedAt: at, streamAt: at, watchedS: 0, httpBytes: 0, p2pBytes: 0, edgeBytes: 0, edgeHitBytes: 0, stalls: 0, stalledMs: 0,
+      v = { joinedAt: at, streamAt: at, watchedS: 0, httpBytes: 0, p2pBytes: 0, upBytes: 0, edgeBytes: 0, edgeHitBytes: 0, stalls: 0, stalledMs: 0,
         errors: 0, dirty: false };
       play.viewers.set(c.userId, v);
     }
@@ -785,10 +850,10 @@ export class Recorder {
     for (const [userId, v] of play.viewers) {
       if (!v.dirty) continue;
       v.dirty = false;
-      this.st(`UPDATE play_viewers SET watched_s = ?, http_bytes = ?, p2p_bytes = ?, edge_bytes = ?,
+      this.st(`UPDATE play_viewers SET watched_s = ?, http_bytes = ?, p2p_bytes = ?, up_bytes = ?, edge_bytes = ?,
                  edge_hit_bytes = ?, stalls = ?, stalled_ms = ?, errors = ?
                WHERE play_id = ? AND user_id = ?`)
-        .run(v.watchedS, Math.round(v.httpBytes), Math.round(v.p2pBytes), Math.round(v.edgeBytes),
+        .run(v.watchedS, Math.round(v.httpBytes), Math.round(v.p2pBytes), Math.round(v.upBytes), Math.round(v.edgeBytes),
           Math.round(v.edgeHitBytes), v.stalls, Math.round(v.stalledMs), v.errors, play.id, userId);
     }
   }
@@ -851,23 +916,29 @@ export class Recorder {
     if (this.closed) return;
     this.db.transaction(() => {
       this.remember(e.userId, e.username, e.at);
+      const cause = e.cause ? { cause: e.cause } : {};
       if (e.type === "stop") {
         const play = this.open.get(e.roomId);
         if (!play) return;
-        this.event(play, e.roomId, e.at, "stop", e.userId, e.username, e.fromS, { role: e.role });
-        this.closePlay(e.roomId, e.at, "stopped", e.username ?? e.userId);
+        this.event(play, e.roomId, e.at, "stop", e.userId, e.username, e.fromS, { role: e.role, ...cause });
+        this.closePlay(e.roomId, e.at, "stopped", e.username ?? e.userId, { cause: e.cause });
         return;
       }
       if (!e.ratingKey) return;
-      const play = this.ensurePlay(e.roomId, e.ratingKey, e.title, e.toS, e.at);
+      const play = this.ensurePlay(e.roomId, e.ratingKey, e.title, e.toS, e.at, undefined,
+        { by: e.username ?? e.userId, cause: e.cause, askedBy: e.askedBy });
       if (e.type === "play") play.playAt = e.at;
       if (e.type === "seek") {
         play.seekAt = e.at;
         this.position(play, null, e.at, e.fromS, true);
       }
       this.position(play, null, e.at, e.toS, e.type !== "pause");
+      // A play that only rebuilt the stream of the title playing (a track
+      // change, a seek past the stream) is no start: its stream's restart says it.
+      if (e.type === "play" && e.rebuild) return;
       this.event(play, e.roomId, e.at, e.type, e.userId, e.username, e.toS,
-        e.type === "seek" ? { role: e.role, fromS: e.fromS, toS: e.toS } : { role: e.role });
+        e.type === "seek" ? { role: e.role, fromS: e.fromS, toS: e.toS, ...cause }
+          : { role: e.role, ...cause, ...(e.askedBy ? { askedBy: e.askedBy } : {}) });
     })();
   }
 
@@ -882,6 +953,8 @@ export class Recorder {
         else if (entry.tag === "Video" && entry.msg === "waiting (buffer starved)") this.waiting(key, entry);
         else if (entry.tag === "Video" && entry.msg === "playing") this.playing(key, userId, entry);
         else if (entry.tag === "Discord" && entry.msg === "channel") this.channelName(entry);
+        else if ((entry.tag === "Video" && entry.msg === "ended")
+          || (entry.tag === "HLS" && entry.msg === "reached the break, ending the title")) this.reachedEnd(userId, entry);
         if (entry.level === "ERROR") this.playerError(userId, entry);
       }
     })();
@@ -890,8 +963,8 @@ export class Recorder {
   private player(key: string, t: number): PlayerState {
     let p = this.players.get(key);
     if (!p) {
-      p = { session: "", p2p: 0, http: 0, edge: 0, edgeHit: 0, sampled: false, waitingSince: null, waitingAfterSeek: false,
-        waitingReady: null, played: false, lastAt: t };
+      p = { session: "", p2p: 0, http: 0, edge: 0, edgeHit: 0, up: 0, upTo: new Map(), upCredited: new Map(), sampled: false,
+        waitingSince: null, waitingAfterSeek: false, waitingReady: null, played: false, lastAt: t };
       this.players.set(key, p);
     }
     p.lastAt = t;
@@ -920,6 +993,17 @@ export class Recorder {
     const edge = Number.isFinite(num(d.edgeMB)) ? num(d.edgeMB) * 1e6 : 0;
     const edgeHit = Number.isFinite(num(d.edgeHitMB)) ? num(d.edgeHitMB) * 1e6 : 0;
     const session = String(d.session ?? "");
+    const up = Number.isFinite(num(d.upMB)) ? num(d.upMB) * 1e6 : 0;
+    const upTo = new Map<string, number>();
+    if (d.upTo && typeof d.upTo === "object") {
+      for (const [k, mb] of Object.entries(d.upTo as Record<string, unknown>)) {
+        if (/^[0-9A-Za-z]{8}$/.test(k) && Number.isFinite(num(mb)) && num(mb) > 0) upTo.set(k, num(mb) * 1e6);
+      }
+    }
+    if (typeof d.peerKey === "string" && /^[0-9A-Za-z]{8}$/.test(d.peerKey)) {
+      this.peerKeys.set(d.peerKey, userId);
+      while (this.peerKeys.size > MAX_PEER_KEYS) this.peerKeys.delete(this.peerKeys.keys().next().value as string);
+    }
     const p = this.player(key, entry.t);
     const baseline = !p.sampled && entry.t - this.startedAt < BASELINE_WINDOW_MS;
     // A new player (a new stream, a rebuild) counts from zero again.
@@ -927,13 +1011,18 @@ export class Recorder {
     // The Discord cache figures start again with each stream too (and with
     // the page, on a player from before they did).
     const pageReloaded = restarted || edge < p.edge || edgeHit < p.edgeHit;
+    // What it sent the others starts again with each stream as well.
+    const upRestarted = restarted || up < p.up;
+    if (upRestarted) p.upCredited = new Map();
     const delta = {
       http: baseline ? 0 : restarted ? http : http - p.http,
       p2p: baseline ? 0 : restarted ? p2p : p2p - p.p2p,
       edge: baseline ? 0 : pageReloaded ? edge : edge - p.edge,
       edgeHit: baseline ? 0 : pageReloaded ? edgeHit : edgeHit - p.edgeHit,
+      up: baseline ? 0 : upRestarted ? up : up - p.up,
     };
-    Object.assign(p, { session, p2p, http, edge, edgeHit, sampled: true });
+    Object.assign(p, { session, p2p, http, edge, edgeHit, up, upTo, sampled: true });
+    if (baseline) p.upCredited = new Map(upTo);
     const paused = d.paused === true || d.paused === "true";
     if (!paused && num(d.playedS) > 0) p.played = true;
     const now = this.viewerNow(userId);
@@ -942,11 +1031,44 @@ export class Recorder {
     now.v.p2pBytes += Math.max(0, delta.p2p);
     now.v.edgeBytes += Math.max(0, delta.edge);
     now.v.edgeHitBytes += Math.max(0, delta.edgeHit);
+    now.v.upBytes += Math.max(0, delta.up);
     now.v.dirty = true;
+    this.shares(now.play, userId, p);
     const got = Math.max(0, delta.http);
     const hit = Math.min(got, Math.max(0, delta.edgeHit));
     if (got || delta.p2p > 0) this.traffic(entry.t, { bot: got - hit, hit, p2p: Math.max(0, delta.p2p) });
     this.position(now.play, userId, entry.t, num(d.posS), !paused);
+  }
+
+  /**
+   * What a player sent each other player since it was last put down, to whom
+   * by their player's key: kept back for a key whose owner hasn't said yet.
+   */
+  private shares(play: OpenPlay, from: string, p: PlayerState): void {
+    for (const [k, total] of p.upTo) {
+      const to = this.peerKeys.get(k);
+      if (!to) continue;
+      const add = total - (p.upCredited.get(k) ?? 0);
+      p.upCredited.set(k, total);
+      if (to === from || !(add > 0)) continue;
+      const pair = `${from}|${to}`;
+      play.shares.set(pair, (play.shares.get(pair) ?? 0) + add);
+      this.st(`INSERT INTO play_shares (play_id, from_user, to_user, bytes) VALUES (?, ?, ?, ?)
+               ON CONFLICT (play_id, from_user, to_user) DO UPDATE SET bytes = bytes + excluded.bytes`)
+        .run(play.id, from, to, Math.round(add));
+    }
+  }
+
+  /** A player reaching the title's end, or the break it was ended at: said once a play. */
+  private reachedEnd(userId: string, entry: ClientLogEntry): void {
+    const now = this.viewerNow(userId);
+    if (!now || now.play.reachedEnd) return;
+    now.play.reachedEnd = true;
+    const posS = num(entry.data.posS);
+    const breakAtS = num(entry.data.breakAtS);
+    this.event(now.play, now.roomId, entry.t, "reached the end", userId, this.nameOf(userId),
+      Number.isFinite(posS) ? posS : Number.isFinite(breakAtS) ? breakAtS : null,
+      entry.tag === "HLS" ? { early: true, ...(Number.isFinite(breakAtS) ? { breakAtS } : {}) } : null);
   }
 
   private waiting(key: string, entry: ClientLogEntry): void {
@@ -1087,6 +1209,7 @@ export class Recorder {
       const play = this.open.get(room.id);
       room.playId = play?.id ?? null;
       room.flow = play ? flowSeries(play.flow, ov.at) : null;
+      room.shares = play ? sharesOf(play.shares) : [];
       for (const c of room.clients) {
         const v = play?.viewers.get(c.userId);
         if (v) c.data = viewerData(v);
@@ -1142,6 +1265,7 @@ export class Recorder {
         firstSeen: Number(v.first_seen), lastSeen: Number(v.last_seen),
         ...viewerData({
           watchedS: Number(v.watched_s), httpBytes: Number(v.http_bytes), p2pBytes: Number(v.p2p_bytes),
+          upBytes: Number(v.up_bytes ?? 0),
           edgeBytes: Number(v.edge_bytes), edgeHitBytes: Number(v.edge_hit_bytes), stalls: Number(v.stalls),
           stalledMs: Number(v.stalled_ms), errors: Number(v.errors), dirty: false,
         }),
@@ -1183,7 +1307,10 @@ export class Recorder {
       const own = byViewer.get(v.userId);
       watched[v.userId] = watchedParts(own && own.length > 1 ? own : within(track, presenceOf(v, events)));
     }
-    return { play, viewers, streams, events, track, watched };
+    const shares = (this.st("SELECT from_user, to_user, bytes FROM play_shares WHERE play_id = ? AND bytes > 0 ORDER BY bytes DESC")
+      .all(id) as Array<{ from_user: string; to_user: string; bytes: number }>)
+      .map((s) => ({ from: s.from_user, to: s.to_user, bytes: Number(s.bytes) }));
+    return { play, viewers, streams, events, track, watched, shares };
   }
 
   usage(opts: { limit?: unknown; before?: unknown } = {}) {
@@ -1233,7 +1360,7 @@ export class Recorder {
     const row = this.st(`${PEOPLE_SELECT} WHERE pe.user_id = @userId`).get({ userId }) as Record<string, unknown> | undefined;
     if (!row) return null;
     const plays = (this.st(`SELECT p.*, ${HOST_NAME}, v.role AS v_role, v.first_seen AS v_first, v.last_seen AS v_last, v.watched_s AS v_watched,
-        v.http_bytes AS v_http, v.p2p_bytes AS v_p2p, v.edge_bytes AS v_edge, v.edge_hit_bytes AS v_hit,
+        v.http_bytes AS v_http, v.p2p_bytes AS v_p2p, v.up_bytes AS v_up, v.edge_bytes AS v_edge, v.edge_hit_bytes AS v_hit,
         v.stalls AS v_stalls, v.stalled_ms AS v_stalled, v.errors AS v_errors
       FROM play_viewers v JOIN plays p ON p.id = v.play_id WHERE v.user_id = ? ORDER BY p.id DESC LIMIT 500`)
       .all(userId) as Array<Record<string, unknown>>)
@@ -1244,7 +1371,7 @@ export class Recorder {
         lastSeen: Number(r.v_last),
         ...viewerData({
           watchedS: Number(r.v_watched), httpBytes: Number(r.v_http), p2pBytes: Number(r.v_p2p),
-          edgeBytes: Number(r.v_edge), edgeHitBytes: Number(r.v_hit), stalls: Number(r.v_stalls),
+          upBytes: Number(r.v_up ?? 0), edgeBytes: Number(r.v_edge), edgeHitBytes: Number(r.v_hit), stalls: Number(r.v_stalls),
           stalledMs: Number(r.v_stalled), errors: Number(r.v_errors), dirty: false,
         }),
       }));
@@ -1255,7 +1382,14 @@ export class Recorder {
         guildId: (r.guild_id as string | null) ?? null, channelId: (r.channel_id as string | null) ?? null,
         launches: Number(r.launches), joins: Number(r.joins), first: Number(r.first), last: Number(r.last),
       }));
-    return { person: personOf(row), plays, requests: this.requests({ userId, limit: 500 }), places };
+    // Whom their player sent the most, and who sent theirs the most.
+    const pairs = (dir: "from_user" | "to_user", other: "from_user" | "to_user") =>
+      (this.st(`SELECT s.${other} AS id, (SELECT username FROM people WHERE user_id = s.${other}) AS name,
+          SUM(s.bytes) AS bytes, COUNT(DISTINCT s.play_id) AS plays
+        FROM play_shares s WHERE s.${dir} = ? GROUP BY s.${other} ORDER BY bytes DESC LIMIT 20`).all(userId) as Array<Record<string, unknown>>)
+        .map((r) => ({ userId: String(r.id), username: (r.name as string | null) ?? null, bytes: Number(r.bytes), plays: Number(r.plays) }));
+    return { person: personOf(row), plays, requests: this.requests({ userId, limit: 500 }), places,
+      sentTo: pairs("from_user", "to_user"), gotFrom: pairs("to_user", "from_user") };
   }
 
   /** Every Discord server the Activity was used in, and each of its channels. */
@@ -1545,11 +1679,25 @@ export class Recorder {
       .map((r) => ({ ratingKey: String(r.k), title: (r.title as string | null) ?? null, plays: int(r.plays),
         people: int(r.people), watchedS: Math.round(int(r.watched)) }));
     const topPeople = rows(`SELECT v.user_id AS id, COALESCE(pe.username, MAX(v.username)) AS name, COUNT(*) AS plays,
-        SUM(v.watched_s) AS watched, SUM(v.http_bytes + v.p2p_bytes) AS bytes
+        SUM(v.watched_s) AS watched, SUM(v.http_bytes + v.p2p_bytes) AS bytes, SUM(v.p2p_bytes) AS got, SUM(v.up_bytes) AS up
       FROM play_viewers v JOIN plays p ON p.id = v.play_id LEFT JOIN people pe ON pe.user_id = v.user_id
       WHERE p.started_at >= @from AND p.started_at < @to GROUP BY v.user_id ORDER BY watched DESC, plays DESC LIMIT 10`)
       .map((r) => ({ userId: String(r.id), username: (r.name as string | null) ?? null, plays: int(r.plays),
-        watchedS: Math.round(int(r.watched)), bytes: int(r.bytes) }));
+        watchedS: Math.round(int(r.watched)), bytes: int(r.bytes), p2pBytes: int(r.got), upBytes: int(r.up) }));
+    // Who sent the others the most, and what went between whom.
+    const sharers = rows(`SELECT v.user_id AS id, COALESCE(pe.username, MAX(v.username)) AS name, COUNT(*) AS plays,
+        SUM(v.up_bytes) AS up, SUM(v.p2p_bytes) AS got
+      FROM play_viewers v JOIN plays p ON p.id = v.play_id LEFT JOIN people pe ON pe.user_id = v.user_id
+      WHERE p.started_at >= @from AND p.started_at < @to GROUP BY v.user_id HAVING SUM(v.up_bytes) > 0
+      ORDER BY up DESC LIMIT 10`)
+      .map((r) => ({ userId: String(r.id), username: (r.name as string | null) ?? null, plays: int(r.plays),
+        upBytes: int(r.up), p2pBytes: int(r.got) }));
+    const pairs = rows(`SELECT s.from_user AS f, s.to_user AS t, SUM(s.bytes) AS bytes,
+        (SELECT username FROM people WHERE user_id = s.from_user) AS fn, (SELECT username FROM people WHERE user_id = s.to_user) AS tn
+      FROM play_shares s JOIN plays p ON p.id = s.play_id WHERE p.started_at >= @from AND p.started_at < @to
+      GROUP BY s.from_user, s.to_user ORDER BY bytes DESC LIMIT 12`)
+      .map((r) => ({ from: String(r.f), fromName: (r.fn as string | null) ?? null, to: String(r.t),
+        toName: (r.tn as string | null) ?? null, bytes: int(r.bytes) }));
     const servers = rows(`SELECT p.guild_id AS g, COUNT(DISTINCT p.id) AS plays, COUNT(DISTINCT v.user_id) AS people,
         COALESCE(SUM(v.watched_s), 0) AS watched
       FROM plays p LEFT JOIN play_viewers v ON v.play_id = p.id WHERE p.started_at >= @from AND p.started_at < @to
@@ -1561,7 +1709,7 @@ export class Recorder {
       .map((r) => ({ reason: String(r.reason), streams: int(r.n) }));
 
     return { days, lastHours, bucket, zone: zone.zone, from, to, totals, daily, hours, weekdays, titles,
-      people: topPeople, servers, reasons, upload };
+      people: topPeople, sharers, pairs, servers, reasons, upload };
   }
 
   /** The history file: how big it is, what it holds, and from when. */
@@ -1724,7 +1872,10 @@ export interface Graphs {
   hours: Array<{ hour: number; plays: number; playedS: number }>;
   weekdays: Array<{ weekday: number; plays: number; playedS: number }>;
   titles: Array<{ ratingKey: string; title: string | null; plays: number; people: number; watchedS: number }>;
-  people: Array<{ userId: string; username: string | null; plays: number; watchedS: number; bytes: number }>;
+  people: Array<{ userId: string; username: string | null; plays: number; watchedS: number; bytes: number; p2pBytes: number; upBytes: number }>;
+  /** Who sent other viewers the most, and what went between whom. */
+  sharers: Array<{ userId: string; username: string | null; plays: number; upBytes: number; p2pBytes: number }>;
+  pairs: Array<{ from: string; fromName: string | null; to: string; toName: string | null; bytes: number }>;
   servers: Array<{ guildId: string | null; plays: number; people: number; watchedS: number }>;
   reasons: Array<{ reason: string; streams: number }>;
 }
@@ -1757,7 +1908,7 @@ const HOST_NAME = "(SELECT pe.username FROM people pe WHERE pe.user_id = p.host_
 const PEOPLE_SELECT = `
   SELECT pe.user_id, pe.username, pe.first_seen, pe.last_seen,
     COALESCE(v.plays, 0) AS plays, COALESCE(v.watched_s, 0) AS watched_s, COALESCE(v.http, 0) AS http,
-    COALESCE(v.p2p, 0) AS p2p, COALESCE(v.edge, 0) AS edge, COALESCE(v.hit, 0) AS hit,
+    COALESCE(v.p2p, 0) AS p2p, COALESCE(v.up, 0) AS up, COALESCE(v.edge, 0) AS edge, COALESCE(v.hit, 0) AS hit,
     COALESCE(v.stalls, 0) AS stalls, COALESCE(v.stalled_ms, 0) AS stalled_ms, COALESCE(v.errors, 0) AS errors,
     (SELECT COUNT(*) FROM plays p WHERE p.host_user_id = pe.user_id) AS hosted,
     (SELECT COUNT(*) FROM usage u WHERE u.user_id = pe.user_id AND u.kind = 'launch') AS launches,
@@ -1766,7 +1917,7 @@ const PEOPLE_SELECT = `
       ORDER BY lv.last_seen DESC LIMIT 1) AS last_title
   FROM people pe
   LEFT JOIN (SELECT user_id, COUNT(*) AS plays, SUM(watched_s) AS watched_s, SUM(http_bytes) AS http,
-      SUM(p2p_bytes) AS p2p, SUM(edge_bytes) AS edge, SUM(edge_hit_bytes) AS hit, SUM(stalls) AS stalls,
+      SUM(p2p_bytes) AS p2p, SUM(up_bytes) AS up, SUM(edge_bytes) AS edge, SUM(edge_hit_bytes) AS hit, SUM(stalls) AS stalls,
       SUM(stalled_ms) AS stalled_ms, SUM(errors) AS errors
     FROM play_viewers GROUP BY user_id) v ON v.user_id = pe.user_id`;
 
@@ -1794,7 +1945,8 @@ function personOf(r: Record<string, unknown>): PersonSummary {
     requests: Number(r.requests),
     lastTitle: (r.last_title as string | null) ?? null,
     ...viewerData({
-      watchedS: Number(r.watched_s), httpBytes: Number(r.http), p2pBytes: Number(r.p2p), edgeBytes: Number(r.edge),
+      watchedS: Number(r.watched_s), httpBytes: Number(r.http), p2pBytes: Number(r.p2p), upBytes: Number(r.up ?? 0),
+      edgeBytes: Number(r.edge),
       edgeHitBytes: Number(r.hit), stalls: Number(r.stalls), stalledMs: Number(r.stalled_ms), errors: Number(r.errors),
       dirty: false,
     }),
@@ -1838,6 +1990,7 @@ function viewerData(v: Omit<ViewerTotals, "joinedAt" | "streamAt">): ViewerData 
     watchedS: Math.round(v.watchedS),
     httpBytes: Math.round(v.httpBytes),
     p2pBytes: Math.round(v.p2pBytes),
+    upBytes: Math.round(v.upBytes),
     edgeBytes: Math.round(v.edgeBytes),
     edgeHitBytes: Math.round(v.edgeHitBytes),
     // Everything not from peers came over HTTP; what Discord's cache didn't
@@ -1863,11 +2016,20 @@ function playOf(r: Record<string, unknown>) {
     endedAt: (r.ended_at as number | null) ?? null,
     endReason: (r.end_reason as string | null) ?? null,
     endBy: (r.end_by as string | null) ?? null,
+    endCause: (r.end_cause as string | null) ?? null,
     startPosS: (r.start_pos_s as number | null) ?? null,
     lastPosS: (r.last_pos_s as number | null) ?? null,
     playedS: Math.round(Number(r.played_s)),
     peakViewers: Number(r.peak_viewers),
   };
+}
+
+/** A play's shares as a list, most first. */
+function sharesOf(m: Map<string, number>): Array<{ from: string; to: string; bytes: number }> {
+  return [...m].map(([pair, bytes]) => {
+    const [from, to] = pair.split("|");
+    return { from, to, bytes: Math.round(bytes) };
+  }).filter((s) => s.bytes > 0).sort((a, b) => b.bytes - a.bytes);
 }
 
 /** Where in the title, over time: [at, position in seconds, 1 if playing]. */

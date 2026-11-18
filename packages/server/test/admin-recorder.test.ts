@@ -656,6 +656,85 @@ console.log("\n— loading the start, buffering, a seek; the host changing the a
     { t: n, level: "LOG", tag: "Discord", msg: "channel", data: { channelId: "423456789012345678", guildId: G, name: "Elsewhere" } });
   check("the names of servers and channels: cleaned; nothing for a bad ID, an empty name, or a channel no Activity runs in",
     nr.placeNames(), { guilds: { [G]: "Film Club" }, channels: { [C]: "Movie Night" } });
+
+  // 17 November: the host's subtitles were each viewer's own change in the
+  // events; a stream "ended" with nothing to say why; a skip of the intro was
+  // a seek; a rebuild of the stream "started playback"; and how a title ended
+  // was "playback was stopped", whatever had happened.
+  check("a stream the host's change left: ended because of it",
+    evs().filter((e) => e.kind === "stream ended").map((e) => [(e.detail as Any).variant, (e.detail as Any).host ?? null, (e.detail as Any).switching ?? null]),
+    [["1:0", "hostess", "audio"]]);
+  (rn.clients as Any[])[0] = client("711", "hostess", { role: "host", variantKey: "2:0", subtitleStreamId: 5 });
+  (rn.clients as Any[])[2] = client("733", "sidekick", { variantKey: "2:0", subtitleStreamId: 5 });
+  nStep(2_000);
+  check("the host changing the subtitles: theirs, and theirs carried to who follows them; not one on subtitles of their own",
+    evs().filter((e) => e.kind === "subtitles").map((e) => [e.username, (e.detail as Any).to, (e.detail as Any).byHost ?? null, (e.detail as Any).host ?? null]),
+    [["hostess", 5, true, null], ["sidekick", 5, null, "hostess"]]);
+  (rn.streams as Any[])[1] = stream("1:3", "SN2", { viewers: [], subtitleStreamId: 3, ownerUserId: "722" });
+  nStep(2_000);
+  (rn.streams as Any[]).splice(1, 1);
+  nStep(2_000);
+  check("  a stream nobody was on any more: ended because of that",
+    evs().filter((e) => e.kind === "stream ended").map((e) => [(e.detail as Any).variant, (e.detail as Any).unwatched ?? null]).at(-1), ["1:3", true]);
+
+  const cmd = (o: Any) => nr.transport({ at: n, roomId: "RN", userId: "711", username: "hostess", role: "host", fromS: rn.positionS as number,
+    toS: rn.positionS as number, ratingKey: "90001", title: "Verity", ...o } as Parameters<typeof nr.transport>[0]);
+  cmd({ type: "seek", toS: 1_500, cause: "skip intro" });
+  rn.positionS = 1_500;
+  const plays = evs().filter((e) => e.kind === "play").length;
+  cmd({ type: "play", rebuild: true });
+  nStep(2_000);
+  check("a seek says what it came from", evs().filter((e) => e.kind === "seek").map((e) => (e.detail as Any).cause ?? null).at(-1), "skip intro");
+  check("  a play that only rebuilt the stream is no start", evs().filter((e) => e.kind === "play").length, plays);
+
+  // Who sent whom what: each player's key from its own sample, what it sent from its own.
+  const up = (session: string, key: string, upMB: number, upTo: Any | null, at: number) => ({ t: at, level: "LOG", tag: "Health", msg: "sample",
+    data: { session, httpMB: 0, p2pMB: 0, peerKey: key, ...(upTo ? { upMB, upTo } : {}), posS: rn.positionS, paused: false } });
+  say("711", up("SN3", "Hostessk", 0, null, n));
+  say("733", up("SN3", "Sidekick", 0, null, n - 10_000), up("SN3", "Sidekick", 3, { Latecome: 2, Hostessk: 1 }, n));
+  nStep(2_000);
+  check("what a player sent the others: in all, and to whom once their player has said who it is",
+    [nr.play(pid)!.viewers.find((v) => v.userId === "733")!.upBytes, nr.play(pid)!.shares], [3e6, [{ from: "733", to: "711", bytes: 1e6 }]]);
+  say("722", up("SN2", "Latecome", 0, null, n));
+  say("733", up("SN3", "Sidekick", 5, { Latecome: 3, Hostessk: 2 }, n + 10_000));
+  nStep(2_000);
+  check("  and what was kept back for a player not known yet, once it is",
+    nr.play(pid)!.shares, [{ from: "733", to: "722", bytes: 3e6 }, { from: "733", to: "711", bytes: 2e6 }]);
+  check("  on Now Playing too", nr.annotate({ at: n, totals: {}, rooms: [structuredClone(rn)] } as unknown as Overview).rooms[0].shares,
+    [{ from: "733", to: "722", bytes: 3e6 }, { from: "733", to: "711", bytes: 2e6 }]);
+  say("733", up("SN4", "Sidekick", 1, { Latecome: 1 }, n + 20_000));
+  nStep(2_000);
+  check("  a new stream's counters start again", [nr.play(pid)!.viewers.find((v) => v.userId === "733")!.upBytes, nr.play(pid)!.shares[0]],
+    [6e6, { from: "733", to: "722", bytes: 4e6 }]);
+  const sideP = nr.person("733")!;
+  check("  a person's: in all, and to whom", [sideP.person.upBytes, sideP.sentTo.map((s) => [s.username, s.bytes]), nr.person("722")!.gotFrom.map((s) => s.username)],
+    [6e6, [["latecomer", 4e6], ["hostess", 2e6]], ["sidekick"]]);
+  const g = nr.graphs({ days: 0 }, n);
+  check("  in the statistics: who sent the most, and between whom",
+    [g.sharers.map((s) => [s.username, s.upBytes]), g.pairs.map((p) => [p.fromName, p.toName, p.bytes])],
+    [[["sidekick", 6e6]], [["sidekick", "latecomer", 4e6], ["sidekick", "hostess", 2e6]]]);
+
+  // The end: the break it was ended at, then the host closing the finished title.
+  say("711", { t: n, level: "LOG", tag: "HLS", msg: "reached the break, ending the title", data: { breakAtS: 7_002.5, posS: 7_001.9 } });
+  say("722", { t: n, level: "LOG", tag: "Video", msg: "ended", data: { posS: 7_002 } });
+  nStep(2_000);
+  cmd({ type: "stop", cause: "finished" });
+  const done = nr.play(pid)!;
+  check("reaching the end: said once, where, and that the stream ended it short of the file's end",
+    done.events.filter((e) => e.kind === "reached the end").map((e) => [e.username, e.posS, e.detail]),
+    [["hostess", 7_001.9, { early: true, breakAtS: 7_002.5 }]]);
+  check("  a stop says how: the title finishing", [done.play.endCause, done.events.at(-1)!.detail],
+    ["finished", { reason: "stopped", cause: "finished", reachedEnd: true }]);
+
+  // The next episode, and a title a co-host asked for.
+  rn.ratingKey = "90002";
+  cmd({ type: "play", ratingKey: "90002", title: "Verity 2", cause: "next episode" });
+  cmd({ type: "play", ratingKey: "90003", title: "Verity 3", cause: "co-host", askedBy: "sidekick" });
+  const [third, second] = nr.history();
+  check("a title ended by the next: how, by whom, and what came next",
+    nr.play(second.id)!.events.at(-1)!.detail, { reason: "another title", cause: "co-host", next: "Verity 3", askedBy: "sidekick" });
+  check("  and the start of the next says what started it", nr.play(third.id)!.events.find((e) => e.kind === "play")!.detail,
+    { role: "host", cause: "co-host", askedBy: "sidekick" });
   nr.close();
 
   // The same history as the recorder before wrote it: the start load was
@@ -678,7 +757,8 @@ console.log("\n— loading the start, buffering, a seek; the host changing the a
       m.viewers.find((v) => v.userId === "722")!.stalls, m.viewers.find((v) => v.userId === "722")!.stalledMs], [1, 2, 1, 3_000]);
   check("  a stream of the title before is nobody's switch, and the subtitles that came with it no change",
     [m.events.filter((e) => e.userId === "733" && e.kind === "stream changed").map((e) => (e.detail as Any).from),
-      m.events.filter((e) => e.kind === "subtitles").length], [["1:0", null], 0]);
+      // Of the subtitles put in above; the host's real change since stays.
+      m.events.filter((e) => e.kind === "subtitles" && !(e.detail as Any).byHost).length], [["1:0", null], 0]);
   mended.close();
   const again = new Database(nPath, { readonly: true });
   check("  once: the history file says it was", again.pragma("user_version", { simple: true }), 2);
@@ -842,15 +922,19 @@ host({ type: "play", ratingKey: "58860", title: "Ghost Stories", subtitles: fals
   position: 0, sessionOffset: 0, audioStreamId: 0, subtitleStreamId: 0 });
 await sleep(150);
 viewer({ type: "pause", position: 5 });
-host({ type: "seek", position: 300 });
+host({ type: "seek", position: 300, cause: "skip intro" });
 await sleep(150);
-host({ type: "stop" });
+host({ type: "seek", position: 320, cause: "<script>" });
+await sleep(150);
+host({ type: "stop", cause: "finished" });
 for (let i = 0; i < 40 && !heard.transport.some((e) => e.type === "stop"); i++) await sleep(25);
 check("the recorder hears what the room acted on, by whom; not a viewer's pause it refused",
   heard.transport.map((e) => [e.type, e.username, e.role, e.ratingKey]),
-  [["play", "alex", "host", "58860"], ["seek", "alex", "host", "58860"], ["stop", "alex", "host", "58860"]]);
+  [["play", "alex", "host", "58860"], ["seek", "alex", "host", "58860"], ["seek", "alex", "host", "58860"], ["stop", "alex", "host", "58860"]]);
 const seek = heard.transport.find((e) => e.type === "seek");
 check("  a seek: to where", seek?.toS, 300);
+check("  what each came from, as the player said; nothing for a cause it doesn't know",
+  heard.transport.map((e) => e.cause ?? null), [null, "skip intro", null, "finished"]);
 check("  a stop: the title it stopped", heard.transport.at(-1)?.title, "Ghost Stories");
 
 setAdminHooks({ transport: () => { throw new Error("a bug in the recorder"); } });

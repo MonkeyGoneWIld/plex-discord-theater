@@ -4,6 +4,7 @@ import { noteServerTime } from "../lib/serverClock";
 import { hdrScreenQuery, playerCaps, type Cap } from "../lib/codecs";
 import { adoptSitting, preferredQuality, setSittingSink } from "../lib/quality";
 import { logEvent } from "../lib/log";
+import { takePlayCause, takeSeekCause } from "../lib/commandCause";
 import { fromMessage as fromHostRequest, type HostRequestView } from "../lib/hostRequest";
 
 const MAX_RECONNECT_ATTEMPTS = 20;
@@ -346,7 +347,8 @@ export interface SyncActions {
   /** Whether this player is short of picture, for the others to ease off the
    *  bot meanwhile — see SyncState.othersLoading. Said again on reconnecting. */
   sendLoading: (short: boolean) => void;
-  sendStop: () => void;
+  /** `cause`: closing the player, or the title finishing — for the Theater Dashboard's events. */
+  sendStop: (cause?: "closed" | "finished") => void;
   /** `waiting`: the host's picture isn't ready — SyncState.hostWaiting.
    *  `switching`: what it is rebuilt for, while it waits — hostSwitching. */
   sendHeartbeat: (position: number, playing: boolean, waiting?: boolean, switching?: Switching | null) => void;
@@ -560,9 +562,13 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
         waiting = false,
         switching: Switching | null = null,
       ) => {
+        // What started this title, if a control said (lib/commandCause): the
+        // first play of it only, so a rebuild says nothing.
+        const cause = takePlayCause(ratingKey);
         send({
           type: "play", ratingKey, title, subtitles, hlsSessionId, position, sessionOffset,
           audioStreamId, subtitleStreamId, playing, subtitleDrawn, quality, waiting, switching,
+          ...(cause ? { cause } : {}),
         });
         if (playing) heldForAnswerAtRef.current = Date.now();
         setState((prev) => {
@@ -621,15 +627,16 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
       },
       // Deliberately does not touch `playing`: a seek says where, not whether.
       sendSeek: (position: number, hold = false, ready = false) => {
-        send({ type: "seek", position, ...(ready ? { ready: true } : {}) });
+        const cause = takeSeekCause();
+        send({ type: "seek", position, ...(ready ? { ready: true } : {}), ...(cause ? { cause } : {}) });
         if (hold) heldForAnswerAtRef.current = Date.now();
         setState((prev) => ({
           ...prev, position, positionAt: Date.now(),
           hostWaiting: (hold && prev.playing) || prev.hostWaiting,
         }));
       },
-      sendStop: () => {
-        send({ type: "stop" });
+      sendStop: (cause?: "closed" | "finished") => {
+        send({ type: "stop", ...(cause ? { cause } : {}) });
         // Optimistically clear local playback state. The server excludes the
         // sender from the "stop" broadcast, so without this the stopping host
         // keeps a stale ratingKey and would look like a live stream to the

@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { api } from "./api";
 import type { PersonSummary } from "./types";
-import { clock, dateTime } from "./format";
+import { bytes, clock, dateTime } from "./format";
+import { ShareList } from "./viz";
 import { BufferingCell, DataCell, Downloads, PlaceName, useLoad, Where } from "./parts";
 import { MiniChart } from "./lazy";
 import { RequestRows } from "./Requests";
@@ -26,7 +27,7 @@ function PeopleList({ onError }: { onError: (e: unknown) => void }) {
     <>
       <div className="page-head">
         <h1>Users</h1>
-        <p className="muted">Everyone who has used the Activity, most recently active first. Select a user for their sessions, requests and servers.</p>
+        <p className="muted">All users of the Activity, most recently active first. Select a user to view their sessions, requests and servers.</p>
       </div>
     <MiniChart kind="people" onError={onError} />
     <section className="card">
@@ -47,7 +48,7 @@ function PeopleList({ onError }: { onError: (e: unknown) => void }) {
             <thead>
               <tr>
                 <th>User</th><th>Discord user ID</th><th>Last seen</th><th>Sessions</th><th>Hosted</th><th>Launches</th>
-                <th>Watch time</th><th>Data received</th><th>Buffering</th><th>Requests</th><th>Last watched</th>
+                <th>Watch time</th><th>Data received</th><th className="num">Sent to viewers</th><th>Buffering</th><th>Requests</th><th>Last watched</th>
               </tr>
             </thead>
             <tbody>{people.map((p) => <PersonRow key={p.userId} p={p} />)}</tbody>
@@ -75,6 +76,7 @@ function PersonRow({ p }: { p: PersonSummary }) {
       <td>{p.launches || "—"}</td>
       <td className="nowrap">{clock(p.watchedS)}</td>
       <td><DataCell d={p} /></td>
+      <td className="num">{p.upBytes > 0 ? bytes(p.upBytes) : "—"}</td>
       <td><BufferingCell d={p} /></td>
       <td>{p.requests || "—"}</td>
       <td>{p.lastTitle ?? "—"}</td>
@@ -86,6 +88,8 @@ function PersonPage({ id, onError }: { id: string; onError: (e: unknown) => void
   const { data, busy } = useLoad(() => api.person(id), [id], onError);
   if (!data) return <p className="empty">{busy ? "Loading…" : "This user was not found."}</p>;
   const { person: p, plays, requests, places } = data;
+  const sentTo = (data.sentTo ?? []).map((s) => ({ from: p.userId, fromName: p.username, to: s.userId, toName: s.username, bytes: s.bytes }));
+  const gotFrom = (data.gotFrom ?? []).map((s) => ({ from: s.userId, fromName: s.username, to: p.userId, toName: p.username, bytes: s.bytes }));
   return (
     <>
       <div className="crumbs"><a href="#people">← Users</a></div>
@@ -95,9 +99,9 @@ function PersonPage({ id, onError }: { id: string; onError: (e: unknown) => void
             <h3>{p.username ?? p.userId}</h3>
             <div className="room-meta">
               <span>{p.plays} {p.plays === 1 ? "session" : "sessions"}</span>
-              <span>Watch time {clock(p.watchedS)}</span>
-              {p.hosted > 0 && <span>Hosted {p.hosted}</span>}
-              {p.launches > 0 && <span>Launched the Activity {p.launches} {p.launches === 1 ? "time" : "times"}</span>}
+              <span>Watch time: {clock(p.watchedS)}</span>
+              {p.hosted > 0 && <span>Hosted: {p.hosted}</span>}
+              {p.launches > 0 && <span>Activity launches: {p.launches}</span>}
             </div>
           </div>
           <dl className="room-ids">
@@ -108,12 +112,29 @@ function PersonPage({ id, onError }: { id: string; onError: (e: unknown) => void
         </header>
         <div className="tiles person-tiles">
           <div className="tile"><div className="tile-label">Data received</div><DataCell d={p} /></div>
+          <div className="tile"><div className="tile-label">Sent to other viewers</div><strong>{bytes(p.upBytes)}</strong></div>
           <div className="tile"><div className="tile-label">Buffering</div><BufferingCell d={p} /></div>
           <div className="tile"><div className="tile-label">Requests</div><strong>{p.requests}</strong></div>
         </div>
 
+        {(sentTo.length > 0 || gotFrom.length > 0) && (
+          <>
+            <h4>Peer-to-peer sharing</h4>
+            <div className="charts">
+              <div>
+                <h5>Sent to</h5>
+                <ShareList shares={sentTo} empty="Nothing sent to other viewers." />
+              </div>
+              <div>
+                <h5>Received from</h5>
+                <ShareList shares={gotFrom} empty="Nothing received from other viewers." />
+              </div>
+            </div>
+          </>
+        )}
+
         <h4>Servers and channels ({places.length})</h4>
-        {places.length === 0 ? <p className="muted">No server activity recorded.</p> : (
+        {places.length === 0 ? <p className="muted">No server activity has been recorded.</p> : (
           <div className="table-wrap">
             <table className="table">
               <thead><tr><th>Server</th><th>Channel</th><th>Launches</th><th>Joins</th><th>First active</th><th>Last active</th></tr></thead>
@@ -136,11 +157,11 @@ function PersonPage({ id, onError }: { id: string; onError: (e: unknown) => void
 
       <section className="card">
         <h3>Sessions ({plays.length})</h3>
-        {plays.length === 0 ? <p className="muted">None recorded.</p> : (
+        {plays.length === 0 ? <p className="muted">No sessions have been recorded.</p> : (
           <div className="table-wrap">
             <table className="table rows">
               <thead>
-                <tr><th>Started</th><th>Title</th><th>Server · channel</th><th>Role</th><th>Watch time</th><th>Data received</th><th>Buffering</th></tr>
+                <tr><th>Started</th><th>Title</th><th>Server · channel</th><th>Role</th><th>Watch time</th><th>Data received</th><th className="num">Sent to viewers</th><th>Buffering</th></tr>
               </thead>
               <tbody>
                 {plays.map((pl) => {
@@ -153,6 +174,7 @@ function PersonPage({ id, onError }: { id: string; onError: (e: unknown) => void
                       <td>{roleName(pl.role)}</td>
                       <td className="nowrap">{clock(pl.watchedS)}</td>
                       <td><DataCell d={pl} /></td>
+                      <td className="num">{pl.upBytes > 0 ? bytes(pl.upBytes) : "—"}</td>
                       <td><BufferingCell d={pl} /></td>
                     </tr>
                   );
@@ -165,7 +187,7 @@ function PersonPage({ id, onError }: { id: string; onError: (e: unknown) => void
 
       <section className="card">
         <h3>Requests ({requests.length})</h3>
-        {requests.length === 0 ? <p className="muted">None recorded.</p> : <RequestRows requests={requests} showWho={false} />}
+        {requests.length === 0 ? <p className="muted">No requests have been recorded.</p> : <RequestRows requests={requests} showWho={false} />}
       </section>
     </>
   );

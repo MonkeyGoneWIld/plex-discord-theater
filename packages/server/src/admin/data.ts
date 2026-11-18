@@ -48,6 +48,8 @@ export interface ViewerData {
   httpBytes: number;
   /** From other viewers' players. */
   p2pBytes: number;
+  /** What their player sent other viewers' players. */
+  upBytes: number;
   /** Of the HTTP, what Discord's proxy answered with a cache status… */
   edgeBytes: number;
   /** …and what its cache had already, so the bot didn't send it. */
@@ -75,6 +77,15 @@ export interface RoomView extends Omit<AdminRoom, "variants" | "clients"> {
   names?: Record<string, string>;
   /** Its delivery over the last minutes, by source (admin/recorder.ts flowSeries). */
   flow?: { stepS: number; windowS: number; points: Array<[number, number, number, number]> } | null;
+  /** What each viewer's player has sent another's in its play, most first. */
+  shares?: Share[];
+}
+
+/** What one viewer's player sent another's. */
+export interface Share {
+  from: string;
+  to: string;
+  bytes: number;
 }
 
 export interface Overview {

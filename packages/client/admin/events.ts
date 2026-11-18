@@ -18,6 +18,7 @@ export type EventGroup = "playback" | "people" | "streams" | "problems" | "other
 
 const GROUPS: Record<string, EventGroup> = {
   play: "playback", pause: "playback", resume: "playback", seek: "playback", stop: "playback", ended: "playback",
+  "reached the end": "playback",
   joined: "people", "came back": "people", left: "people", "away from Discord": "people", "back in Discord": "people",
   role: "people",
   "stream started": "streams", "stream restarted": "streams", "stream ended": "streams", "stream changed": "streams",
@@ -41,9 +42,56 @@ const secs = (ms: unknown) => {
 const role = (v: unknown) => (v === "co-host" ? "co-host" : v === "host" ? "host" : "viewer");
 
 const END_REASONS: Record<string, string> = {
-  stopped: "playback was stopped", "another title": "the next title started", "room closed": "everyone left",
+  stopped: "playback was stopped", "another title": "another title was started", "room closed": "all viewers left",
   "server stopped": "the server shut down", "server restarted": "the server restarted unexpectedly",
 };
+
+/** The control a seek came from (client lib/commandCause.ts). */
+const SEEK_CAUSES: Record<string, string> = {
+  "skip intro": "Skip Intro", "skip credits": "Skip Credits", timeline: "the timeline",
+  "jump back": "the jump-back control", "jump forward": "the jump-forward control",
+};
+
+/** Where a title was started from (client lib/commandCause.ts; "co-host" from sync.ts). */
+const PLAY_CAUSES: Record<string, string> = {
+  picked: "the library", "next episode": "Next Episode", "previous episode": "Previous Episode",
+  "up next": "the Up Next card", "end screen": "the end screen", queue: "the queue", "co-host": "a co-host's request",
+};
+
+/** How a player stopped (client useSync sendStop). */
+const STOP_CAUSES: Record<string, string> = { closed: "closed the player", finished: "reached the end of the title" };
+
+/** "alex (host)": who did it, and as what, when the event says. */
+function actor(who: string, d: Record<string, unknown>): string {
+  return d.role === "host" || d.role === "co-host" ? `${who} (${d.role})` : who;
+}
+
+/** How a title was ended by another starting: "alex started the next episode, Verity 2". */
+function nextText(d: Record<string, unknown>, by: string | null): string {
+  const next = d.next ? String(d.next) : "the next title";
+  const who = by ?? "The host";
+  switch (d.cause) {
+    case "next episode": return `${who} started the next episode, ${next}`;
+    case "previous episode": return `${who} started the previous episode, ${next}`;
+    case "up next": return `${who} started ${next} from the Up Next card`;
+    case "end screen": return `${who} started ${next} from the end screen`;
+    case "queue": return `${who} started ${next} from the queue`;
+    case "co-host": return `${who} started ${next} at ${d.askedBy ? String(d.askedBy) : "a co-host"}'s request`;
+    case "picked": return `${who} started a different title, ${next}`;
+    default: return by ? `${by} started ${next}` : `${next} was started`;
+  }
+}
+
+/** Why a session ended, as said after "Session ended: ". */
+function endText(d: Record<string, unknown>, by: string | null): string {
+  if (d.reason === "another title") return nextText(d, by);
+  if (d.reason === "stopped") {
+    if (d.cause === "finished") return "the title finished";
+    if (d.cause === "closed") return `${by ?? "the host"} closed the player${d.reachedEnd ? " after the end was reached" : ""}`;
+    return `${by ? `${by} stopped playback` : "playback was stopped"}${d.reachedEnd ? " after the end was reached" : ""}`;
+  }
+  return END_REASONS[String(d.reason)] ?? (d.reason ? String(d.reason) : "no reason was recorded");
+}
 
 /** A track by its name where the title's are known — "Japanese (AC3 5.1)" — else by number. 0 is `none`. */
 export function trackName(ctx: EventContext | undefined, id: unknown, none = "off"): string {
@@ -108,17 +156,36 @@ export function eventText(e: PlayEvent, ctx?: EventContext): string {
   const who = e.username ?? e.userId ?? "A viewer";
   const d = e.detail ?? {};
   switch (e.kind) {
-    case "play": return `${who} started playback`;
-    case "pause": return `${who} paused playback`;
-    case "resume": return `${who} resumed playback`;
-    case "seek": return `${who} seeked from ${clock(Number(d.fromS))} to ${clock(Number(d.toS))}`;
-    case "stop": return `${who} stopped playback`;
-    case "ended": return `Session ended: ${END_REASONS[String(d.reason)] ?? d.reason ?? "no reason recorded"}${e.username ? ` (${e.username})` : ""}`;
+    case "play": {
+      if (d.cause === "co-host") return `${actor(who, d)} started this title at ${d.askedBy ? String(d.askedBy) : "a co-host"}'s request`;
+      const from = PLAY_CAUSES[String(d.cause)];
+      return from ? `${actor(who, d)} started this title from ${from}` : `${actor(who, d)} started playback`;
+    }
+    case "pause": return `${actor(who, d)} paused playback`;
+    case "resume": return `${actor(who, d)} resumed playback`;
+    case "seek": {
+      const range = `${clock(Number(d.fromS))} to ${clock(Number(d.toS))}`;
+      if (d.cause === "skip intro" || d.cause === "skip credits") return `${actor(who, d)} used ${SEEK_CAUSES[d.cause]}: ${range}`;
+      if (d.cause === "jump back" || d.cause === "jump forward") {
+        const by = Math.abs(Number(d.toS) - Number(d.fromS));
+        return `${actor(who, d)} jumped ${d.cause === "jump back" ? "back" : "forward"}${Number.isFinite(by) ? ` ${Math.round(by)} s` : ""}: ${range}`;
+      }
+      const via = SEEK_CAUSES[String(d.cause)];
+      return `${actor(who, d)} moved playback from ${range}${via ? ` using ${via}` : ""}`;
+    }
+    case "stop": {
+      const how = STOP_CAUSES[String(d.cause)];
+      return how ? `${actor(who, d)} ${how}; playback stopped` : `${actor(who, d)} stopped playback`;
+    }
+    case "ended": return `Session ended: ${endText(d, e.username)}`;
+    case "reached the end": return d.early
+      ? `${who} reached the end of the stream${Number.isFinite(Number(d.breakAtS)) ? ` at ${clock(Number(d.breakAtS))}` : ""}, before the length Plex reports; playback was ended there`
+      : `${who} reached the end of the title`;
     case "joined": return `${who} joined as ${role(d.role)}`;
     case "came back": return `${who} reconnected`;
     case "left": return `${who} left`;
-    case "away from Discord": return `${who} switched away from Discord`;
-    case "back in Discord": return `${who} returned to Discord`;
+    case "away from Discord": return `${who} switched away from the Discord window`;
+    case "back in Discord": return `${who} returned to the Discord window`;
     case "role": return `${who} became ${role(d.to)}`;
     case "stream changed": {
       const on = `${streamLabel(ctx, d.to)} (${tracksOf(ctx, d.to, d)})`;
@@ -130,23 +197,84 @@ export function eventText(e: PlayEvent, ctx?: EventContext): string {
       const what = streamDiff(d.from, d.to);
       return `${who} moved from ${streamLabel(ctx, d.from)} to ${on}${what.length ? `: a change of ${what.join(" and ")}` : ""}`;
     }
-    case "subtitles": return `${who} changed subtitles from ${trackName(ctx, d.from)} to ${trackName(ctx, d.to)}`;
-    case "quality": return `${who} changed quality from ${quality(Number(d.from))} to ${quality(Number(d.to))}`;
+    case "subtitles": {
+      const change = `from ${trackName(ctx, d.from)} to ${trackName(ctx, d.to)}`;
+      if (d.byHost) return `${who} (host) changed the subtitles ${change}`;
+      if (d.host) return `${who}'s subtitles changed ${change}, following ${String(d.host)} (host)`;
+      return `${who} changed the subtitles ${change}`;
+    }
+    case "quality": return `${who} changed the quality from ${quality(Number(d.from))} to ${quality(Number(d.to))}`;
     case "stream started": return `${d.variant ? streamLabel(ctx, d.variant) : "A stream"} started${e.username ? ` for ${e.username}` : ""}${d.summary ? `: ${d.summary}` : ""}`;
     case "stream restarted": return d.replaced
       ? `${streamLabel(ctx, d.variant)} restarted under a new session${d.summary ? `: ${d.summary}` : ""}`
       : `${streamLabel(ctx, d.variant)} restarted at ${clock(Number(d.toOffsetS))} (previously ${clock(Number(d.fromOffsetS))})`;
-    case "stream ended": return `${streamLabel(ctx, d.variant)} ended`;
+    case "stream ended": {
+      const label = streamLabel(ctx, d.variant);
+      if (d.host) return `${label} ended after ${String(d.host)} ${switchedText(d.switching) ?? "changed tracks"}`;
+      if (d.unwatched) return `${label} ended: no viewers remained on it`;
+      return `${label} ended`;
+    }
     case "room waited": {
       const did = switchedText(d.switching);
       const why = did ? `after the host ${did}` : WAITED_FOR[String(d.why)] ?? (d.why ? `(${String(d.why)})` : "");
-      return `Playback waited ${secs(d.ms)} for the host's picture${why ? ` ${why}` : ""}`;
+      return `Playback waited ${secs(d.ms)} for the host's video${why ? ` ${why}` : ""}`;
     }
-    case "buffering": return `${who} buffered for ${secs(d.ms)}`;
-    case "loaded after seek": return `${who} loaded for ${secs(d.ms)} after a seek`;
-    case "loaded at start": return `${who} loaded for ${secs(d.ms)} as they started`;
-    case "player error": return `${who}: player error: ${d.msg ?? "unknown"}${d.tag ? ` (${d.tag})` : ""}`;
-    default: return `${e.kind}${e.username ? ` — ${e.username}` : ""}`;
+    case "buffering": return `${who} was buffering for ${secs(d.ms)}`;
+    case "loaded after seek": return `${who}'s player took ${secs(d.ms)} to load after a seek`;
+    case "loaded at start": return `${who}'s player took ${secs(d.ms)} to load at the start`;
+    case "player error": return `Player error for ${who}: ${d.msg ?? "unknown error"}`;
+    default: return `${e.kind}${e.username ? ` (${e.username})` : ""}`;
+  }
+}
+
+/** A field of an event's detail, named for the dashboard; fields not listed are left out. */
+const DETAIL_LABELS: Record<string, string> = {
+  role: "Role", cause: "Action", fromS: "From", toS: "To", from: "From", to: "To", reason: "Reason", next: "Next title",
+  askedBy: "Requested by", reachedEnd: "End reached", breakAtS: "Stream ended at", ms: "Duration", why: "Reason",
+  host: "Host", switching: "Host's change", variant: "Stream", summary: "Delivery", audioStreamId: "Audio",
+  subtitleStreamId: "Subtitles", quality: "Quality", engine: "Engine", fromOffsetS: "Previous start", toOffsetS: "New start",
+  offsetS: "Starts at", msg: "Message", tag: "Source", session: "Stream session", replaced: "Replaced session",
+};
+
+const AS_IS = new Set(["askedBy", "host", "next", "msg", "tag", "session", "replaced", "summary", "engine"]);
+
+/** An event's detail as labelled rows: what the expanded event shows. */
+export function eventDetails(e: PlayEvent, ctx?: EventContext): Array<[string, string]> {
+  const d = e.detail ?? {};
+  const out: Array<[string, string]> = [];
+  for (const [k, v] of Object.entries(d)) {
+    const label = DETAIL_LABELS[k];
+    if (!label || v === null || v === undefined || v === "") continue;
+    const value = detailValue(e.kind, k, v, ctx);
+    // Names and messages as they are; the dashboard's own words start with a capital.
+    out.push([label, AS_IS.has(k) ? value : value.charAt(0).toUpperCase() + value.slice(1)]);
+  }
+  if (d.byHost) out.push(["Changed by", "The host"]);
+  if (d.unwatched) out.push(["Reason", "No viewers remained on it"]);
+  if (d.early) out.push(["Ended early", "Yes: the stream ended before the length Plex reports"]);
+  return out;
+}
+
+function detailValue(kind: string, k: string, v: unknown, ctx?: EventContext): string {
+  switch (k) {
+    case "fromS": case "toS": case "breakAtS": case "fromOffsetS": case "toOffsetS": case "offsetS": return clock(Number(v));
+    case "ms": return secs(v);
+    case "role": return role(v);
+    case "reachedEnd": return v ? "Yes" : "No";
+    case "cause": return SEEK_CAUSES[String(v)] ?? PLAY_CAUSES[String(v)] ?? STOP_CAUSES[String(v)] ?? (v === "finished" ? "The title finished" : String(v));
+    case "reason": return kind === "ended" ? (END_REASONS[String(v)] ?? String(v)) : WAITED_FOR[String(v)] ?? String(v);
+    case "why": return WAITED_FOR[String(v)] ?? switchedText(v) ?? String(v);
+    case "switching": return switchedText(v) ?? String(v);
+    case "variant": return streamLabel(ctx, v);
+    case "audioStreamId": return trackName(ctx, v, "default");
+    case "subtitleStreamId": return trackName(ctx, v);
+    case "quality": return quality(Number(v));
+    case "from": case "to":
+      if (kind === "stream changed") return v ? streamLabel(ctx, v) : "—";
+      if (kind === "subtitles") return trackName(ctx, v);
+      if (kind === "quality") return quality(Number(v));
+      return role(v);
+    default: return typeof v === "object" ? JSON.stringify(v) : String(v);
   }
 }
 

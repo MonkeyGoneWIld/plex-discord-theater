@@ -667,3 +667,16 @@ a.fact, .fact a { color: var(--accent); }
 .upload-card .tiles { margin-top: 12px; }
 .upload-card h4 { margin: 18px 0 8px; }
 .upload-card .note { margin-top: 12px; }
+
+/* Who sent whom what (viz.tsx ShareList). */
+.share-row { grid-template-columns: minmax(0, 46%) minmax(0, 1fr) auto; }
+.share-pair { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 13px; }
+.share-person { display: inline-flex; align-items: center; gap: 6px; min-width: 0; color: var(--text); }
+.share-person span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.share-arrow { color: var(--muted); flex: none; }
+@media (max-width: 760px) {
+  .share-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .share-row .bar-track { grid-column: 1 / -1; grid-row: 2; }
+}
+
+.charts h5 { margin: 6px 0 0; font-size: 12.5px; font-weight: 600; color: var(--muted); }

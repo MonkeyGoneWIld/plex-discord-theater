@@ -14,6 +14,7 @@ import type { PreviewPass, PreviewStatus } from "../lib/previewStatus";
 import { getLevel, setLevel, boostAvailable, BOOST_ACCENT, MAX_LEVEL } from "../lib/audioBoost";
 import { useMediaQuery, COMPACT_CONTROLS_QUERY, PHONE_QUERY } from "../lib/useMediaQuery";
 import { QUIET_SURFACE } from "../lib/surface";
+import { noteSeekCause } from "../lib/commandCause";
 
 export interface ControlsHandle {
   /**
@@ -865,6 +866,7 @@ export function Controls({
       if (!canControl || !videoRef.current) return;
       if (!duration || !isFinite(duration)) return;
       const newTime = pct * duration;
+      noteSeekCause("timeline");
       // onSeekRestart is the host's smart seek: in-place when the target is
       // reachable in the current transcode, transcode restart otherwise.
       if (onSeekRestart) {
@@ -916,6 +918,7 @@ export function Controls({
     if (skipTimerRef.current !== null) clearTimeout(skipTimerRef.current);
     skipTimerRef.current = setTimeout(() => {
       skipTimerRef.current = null;
+      noteSeekCause(target < skipBaseRef.current ? "jump back" : "jump forward");
       skipTo(target);
       // Held a beat past the seek so the total doesn't vanish the instant it
       // is applied, which reads as the click having been dropped, and only then

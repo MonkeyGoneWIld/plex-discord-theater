@@ -14,12 +14,8 @@ export function Places({ onError }: { onError: (e: unknown) => void }) {
     <>
       <div className="page-head">
         <h1>Discord Servers</h1>
-        <p className="muted">Where the Activity is used: each Discord server and channel, with its launches, viewers and sessions.</p>
+        <p className="muted">Discord servers and channels where the Activity is used, with launches, users and sessions.</p>
       </div>
-      <p className="note">
-        Discord gives an Activity only server and channel IDs. Their names are learned as people use it: a server's when
-        somebody signs in there, a channel's when the Activity opens in it. Until then the ID is shown; hover a name for its ID.
-      </p>
       {busy && !data ? <p className="empty">Loading…</p> : guilds.length === 0
         ? <section className="card"><p className="empty">No launches have been recorded yet.</p></section>
         : guilds.map((g) => <GuildCard key={g.guildId ?? "none"} g={g} />)}
@@ -90,7 +86,7 @@ function Launches({ onError }: { onError: (e: unknown) => void }) {
         <h3>Launches and joins</h3>
         <Downloads kind="usage" />
       </div>
-      {busy && !data ? <p className="empty">Loading…</p> : rows.length === 0 ? <p className="empty">None recorded yet.</p> : (
+      {busy && !data ? <p className="empty">Loading…</p> : rows.length === 0 ? <p className="empty">No launches or joins have been recorded.</p> : (
         <div className="table-wrap">
           <table className="table">
             <thead><tr><th>Time</th><th>Event</th><th>User</th><th>Discord user ID</th><th>Server</th><th>Channel</th><th>Room</th></tr></thead>

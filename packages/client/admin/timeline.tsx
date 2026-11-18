@@ -96,7 +96,7 @@ function PositionLane({ track, start, end, durationS, marks }: {
   const posAt = at === null ? null : positionAt(track, at);
   return (
     <div className="lane lane-position">
-      <div className="lane-label">Position<span className="muted small">in the title, 0:00 to {clock(durationS)}</span></div>
+      <div className="lane-label">Position<span className="muted small">0:00 – {clock(durationS)}</span></div>
       <div className="lane-track position-track"
         onMouseMove={(e) => {
           const r = e.currentTarget.getBoundingClientRect();
@@ -178,7 +178,7 @@ export function SessionChart({ data, durationS, ctx }: { data: PlayDetail; durat
         const stalls: Seg[] = mine.filter((e) => e.kind === "buffering" || e.kind === "loaded after seek" || e.kind === "loaded at start").map((e) => {
           const ms = Number(e.detail?.ms) || 0;
           return { from: e.at - ms, to: e.at, tone: e.kind === "buffering" ? "bad" : "info",
-            title: `${e.kind === "buffering" ? "Buffering" : e.kind === "loaded at start" ? "Loading the start" : "Loading after a seek"}`
+            title: `${e.kind === "buffering" ? "Buffering" : e.kind === "loaded at start" ? "Loading at start" : "Loading after seek"}`
               + `${e.posS !== null ? ` at ${clock(e.posS)}` : ""} · ${when(e.at - ms, e.at)}` };
         });
         return (
@@ -202,9 +202,9 @@ export function SessionChart({ data, durationS, ctx }: { data: PlayDetail; durat
         <li><span className="swatch" style={{ background: "var(--warn)" }} />Transcode / waiting for the host</li>
         <li><span className="swatch" style={{ background: "var(--bad)" }} />Buffering</li>
         <li><span className="swatch error-key" />Player error</li>
-        <li><span className="swatch" style={{ background: "var(--info)" }} />Loading the start or after a seek</li>
+        <li><span className="swatch" style={{ background: "var(--info)" }} />Loading (start or after seek)</li>
         <li><span className="swatch" style={{ background: "var(--muted)" }} />Paused</li>
-        <li><span className="swatch mark" />Change (hover for details)</li>
+        <li><span className="swatch mark" />Event</li>
       </ul>
     </div>
   );
@@ -235,10 +235,10 @@ export function Watched({ data, durationS }: { data: PlayDetail; durationS: numb
     );
   };
   const trouble = (userId: string | null) => data.events.filter((e) => (e.kind === "buffering" || e.kind === "player error") && (!userId || e.userId === userId));
-  if (all.length === 0) return <p className="muted">Where in the title it played wasn't recorded for this session.</p>;
+  if (all.length === 0) return <p className="muted">Playback position was not recorded for this session.</p>;
   return (
-    <div className="session-chart watched-chart" role="img" aria-label="What of the title each viewer watched">
-      {data.viewers.length > 1 && row("all", "Anyone", all, trouble(null))}
+    <div className="session-chart watched-chart" role="img" aria-label="Portions of the title each viewer watched">
+      {data.viewers.length > 1 && row("all", "All viewers", all, trouble(null))}
       {data.viewers.map((v) => row(v.userId,
         <span className="lane-person"><Avatar id={v.userId} name={v.username} size={20} />{v.username ?? v.userId}</span>,
         watched[v.userId] ?? [], trouble(v.userId)))}
@@ -268,6 +268,8 @@ export function keyMoments(data: PlayDetail, ctx: EventContext = {}): Moment[] {
   let started = 0;
   // The host's last change of tracks, and who moved with them.
   let move: { name: string; at: number; moment: Moment; base: string; followers: string[]; to: string } | null = null;
+  // The host's last change of subtitles, and whose followed it.
+  let subs: { name: string; at: number; moment: Moment; base: string; followers: string[] } | null = null;
   const of = (e: PlayEvent, m: Omit<Moment, "id" | "at" | "posS">): Moment => {
     const moment = { id: e.id, at: e.at, posS: e.posS, ...m };
     out.push(moment);
@@ -286,7 +288,7 @@ export function keyMoments(data: PlayDetail, ctx: EventContext = {}): Moment[] {
       of(e, started === 1
         ? { tone: dec?.tone ?? "muted", icon: "now", title: `Playback started on ${streamLabel(ctx, d.variant)}${dec ? ` (${dec.label})` : ""}`, why }
         : { tone: dec?.tone ?? "warn", icon: "split", title: `${streamLabel(ctx, d.variant)} was created${e.username ? ` for ${e.username}` : ""}${dec ? ` (${dec.label})` : ""}`,
-          why: why ? `${why}. A viewer gets a stream of their own when the room's stream doesn't suit their player, tracks or quality limit.` : undefined });
+          why: why ? `${why}. A separate stream is created when a viewer's player, tracks or quality limit differ from the room's stream.` : undefined });
     } else if (e.kind === "stream changed" && d.from && d.from !== d.to) {
       const to = streamLabel(ctx, d.to);
       const tracks = `audio ${trackName(ctx, d.audioStreamId, "default")}, subtitles ${trackName(ctx, d.subtitleStreamId)}`;
@@ -309,8 +311,24 @@ export function keyMoments(data: PlayDetail, ctx: EventContext = {}): Moment[] {
       of(e, { tone: "info", icon: "settings", title: `${who} changed their quality limit`, why: `${quality(Number(d.from))} → ${quality(Number(d.to))}` });
     } else if (e.kind === "subtitles") {
       if (d.from !== d.to && (Number(d.from) || Number(d.to))) {
-        of(e, { tone: "muted", icon: "logs", title: `${who} changed subtitles`, why: `${trackName(ctx, d.from)} → ${trackName(ctx, d.to)}` });
+        const change = `${trackName(ctx, d.from)} → ${trackName(ctx, d.to)}`;
+        if (d.host && subs && subs.name === d.host && e.at - subs.at <= 15_000) {
+          // Whose subtitles followed the host's, on the host's moment.
+          subs.followers.push(who);
+          subs.moment.why = `${subs.base}. Also changed for ${listed(subs.followers)}.`;
+        } else if (d.byHost) {
+          subs = { name: who, at: e.at, base: change, followers: [], moment: of(e, { tone: "info", icon: "logs", title: `${who} (host) changed the subtitles`, why: change }) };
+        } else {
+          of(e, { tone: "muted", icon: "logs", title: d.host ? `${who}'s subtitles changed with the host's` : `${who} changed the subtitles`, why: change });
+        }
       }
+    } else if (e.kind === "seek" && (d.cause === "skip intro" || d.cause === "skip credits")) {
+      of(e, { tone: "muted", icon: "chevron", title: eventText(e, ctx).replace(/: .*$/, ""), why: `${clock(Number(d.fromS))} → ${clock(Number(d.toS))}` });
+    } else if (e.kind === "reached the end") {
+      of(e, d.early
+        ? { tone: "warn", icon: "check", title: `The stream ended${Number.isFinite(Number(d.breakAtS)) ? ` at ${clock(Number(d.breakAtS))}` : ""}, before the length Plex reports`,
+          why: "The file's video ends earlier than its reported length, so playback was ended at that point." }
+        : { tone: "muted", icon: "check", title: `${who} reached the end of the title` });
     } else if (e.kind === "role") {
       of(e, { tone: "info", icon: "users", title: eventText(e, ctx) });
     } else if (e.kind === "stream restarted") {
@@ -319,7 +337,7 @@ export function keyMoments(data: PlayDetail, ctx: EventContext = {}): Moment[] {
       of(e, { tone: "warn", icon: "pulse", title: eventText(e, ctx) });
     } else if (e.kind === "room waited" && Number(d.ms) >= 5000) {
       of(e, { tone: "warn", icon: "clock", title: eventText(e, ctx),
-        why: "The room waits only for the host's picture; anybody not ready yet catches up while it plays." });
+        why: "Only the host's video is waited for; other viewers catch up while playback continues." });
     } else if (e.kind === "player error") {
       of(e, { tone: "bad", icon: "alert", title: eventText(e, ctx) });
     } else if (e.kind === "ended") {
@@ -331,7 +349,7 @@ export function keyMoments(data: PlayDetail, ctx: EventContext = {}): Moment[] {
 
 export function KeyMoments({ data, ctx }: { data: PlayDetail; ctx: EventContext }) {
   const moments = keyMoments(data, ctx);
-  if (moments.length === 0) return <p className="muted">Nothing notable happened in this session.</p>;
+  if (moments.length === 0) return <p className="muted">No notable events were recorded for this session.</p>;
   return (
     <ol className="moments">
       {moments.map((m) => (

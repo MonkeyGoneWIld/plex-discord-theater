@@ -109,7 +109,7 @@ instanceHosts.set(ghosts, { hostUserId: "100000000000000001", guildId: "99900011
 const copy = crypto.randomUUID();
 rememberStreamNotes(copy, {
   engine: "ffmpeg", video: "copy", kbps: 3837, videoFrom: "HEVC Main 10 · 10-bit · SDR · 1440×1080 · 23.976 fps", range: "SDR",
-  audio: "transcode", audioFrom: "AC3 2.0", audioTo: "AAC 2.0", audioKbps: 256, audioReason: "AC3 isn't played by Discord's browser",
+  audio: "transcode", audioFrom: "AC3 2.0", audioTo: "AAC 2.0", audioKbps: 256, audioReason: "Unsupported codec (AC3)",
 });
 const host = await join(ghosts, "100000000000000001", "alex");
 host({ type: "play", ratingKey: "58861", title: "Ghost Stories — S01E03", subtitles: false, hlsSessionId: copy,
@@ -149,13 +149,20 @@ await join(idle, "300000000000000001", "lurker");
 // the bot, some from Discord's cache, some from other viewers.
 const viewers = ["100000000000000001", "402115789012345678", "402115789012345679", "402115789012345680", "200000000000000001", "200000000000000002"];
 let sampled = 0;
+// Each player's key, as its peer id carries it, and whom it sends: the
+// episode's host and third viewer send the other two, the film's host its viewer.
+const keyOf = (id: string) => `K${id.slice(0, 1)}${id.slice(-6)}`;
+const SENDS: Record<number, Array<[number, number]>> = { 0: [[1, 0.6], [3, 0.5]], 2: [[1, 0.4], [3, 0.5]], 4: [[5, 1]] };
 const feed = () => {
   sampled++;
   viewers.forEach((userId, i) => {
     const mb = sampled * (3 + i);
+    const upTo = Object.fromEntries((SENDS[i] ?? []).map(([to, share]) => [keyOf(viewers[to]), (sampled * (3 + to)) / 3 * share]));
+    const upMB = Object.values(upTo).reduce((a, b) => a + b, 0);
     recorder.clientLog({ at: Date.now(), userId, clientId: `fixture${i}`, entries: [{
       t: Date.now(), level: "LOG", tag: "Health", msg: "sample",
       data: { session: "fixture", httpMB: mb, p2pMB: i % 2 ? mb / 3 : 0, edgeHitMB: (mb * 0.4).toFixed(1), edgeMB: (mb * 0.9).toFixed(1),
+        peerKey: keyOf(userId), ...(upMB > 0 ? { upMB, upTo } : {}),
         // Where each player is: the episode playing from 312 s, the film paused at 4210 s.
         ...(i < 4 ? { posS: 312 + sampled * 10, paused: false, playedS: 10 } : { posS: 4210, paused: true, playedS: 0 }) },
     }] });

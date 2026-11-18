@@ -55,13 +55,14 @@ import { bufferedRanges, coveredAheadS, forgetEvicted, heldRanges, JOIN_TOLERANC
 import { backfillShare, backfillTitle, catchingUpTitle, loadingScreenSays, loadingTitle } from "../lib/loadingMessage";
 import { safeBackCutS, skipCutS } from "../lib/bufferTrim";
 import { rebuildToAdopt } from "../lib/adoptStream";
-import { MAX_PARTS, PARTS_AT_ONCE_BESIDE, edgeCacheOf, edgeTotals, resetEdgeTotals, fetchInPartsLater, firstByteMs, inBrowserCache, installSegmentParts, keepLater, partsFor, partsPeak, pumpSegmentParts, segmentBytesOf } from "../lib/segmentParts";
+import { MAX_PARTS, PARTS_AT_ONCE_BESIDE, edgeCacheOf, edgeTotals, resetEdgeTotals, fetchInPartsLater, firstByteMs, inBrowserCache, installSegmentParts, keepLater, partsFor, partsPeak, pumpSegmentParts, refusedStatus, segmentBytesOf } from "../lib/segmentParts";
 import { NEXT_NEEDED_SLACK_S, nextNeededSegment, type ListedSegment } from "../lib/nextNeeded";
 import { guardPieceLoads, keyframeGroups, leadInBytes, opensOnKeyframe } from "../lib/keyframeGroups";
 import { keepStats, stopKeepingSegments } from "../lib/segmentKeep";
-import { fragLoadFailure, freshUrl, mayEndAtBreak } from "../lib/segmentRetry";
+import { fragLoadFailure, freshUrl, mayEndAtBreak, waitsToPlay } from "../lib/segmentRetry";
 import { installTakeFromPeer } from "../lib/takeFromPeer";
-import { peerIdPrefix } from "../lib/peerSpeeds";
+import { peerIdPrefix, playerKeyOf } from "../lib/peerSpeeds";
+import { notePlayCause, noteSeekCause, type PlayCause } from "../lib/commandCause";
 import { connectionsSeen, watchPeerConnections } from "../lib/peerConnections";
 import { RTC_CONFIG, joinSideSwarm, sideShare, trackerAnnounce } from "../lib/sideShare";
 import { axisZoomScale, zoomKey } from "../lib/videoZoom";
@@ -1552,7 +1553,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   }, [item.ratingKey]);
   // Cumulative P2P delivery counters, filled from the p2p-media-loader engine
   // events below and read by the StatsOverlay each poll.
-  const p2pStatsRef = useRef<P2PStats>({ p2pBytes: 0, httpBytes: 0, uploadBytes: 0, peers: new Set() });
+  const p2pStatsRef = useRef<P2PStats>({ p2pBytes: 0, httpBytes: 0, uploadBytes: 0, uploadTo: new Map(), peers: new Set() });
   // Rolling record of the p2p-media-loader engine's fragment-loader activity,
   // filled from its onSegment* events below. A silent mid-video stall parks the
   // buffer with no error thrown, and the health sample alone can't say whether
@@ -1806,6 +1807,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   const wedgeLastAtRef = useRef(0);
   /** When the playhead last started being stuck, or 0 while it isn't. */
   const wedgeStuckSinceRef = useRef(0);
+  /** Where the wedge watchdog last rebuilt the stream: stuck there again, it may end the title. */
+  const wedgeRebuiltAtRef = useRef<number | null>(null);
   // Plex intro/credits markers for the current item, and whichever one the
   // playhead currently sits inside (null when outside every window).
   const [markers, setMarkers] = useState<SkipMarker[]>([]);
@@ -5332,6 +5335,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                 stats.p2pBytes = 0;
                 stats.httpBytes = 0;
                 stats.uploadBytes = 0;
+                stats.uploadTo = new Map();
                 stats.peers = new Set();
 
                 const eng = engineLoaderRef.current;
@@ -5376,9 +5380,11 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                   // What the answer was — "part 3 of 8: HTTP 410", "… bytes,
                   // expected …" — which the type alone never said.
                   const message = error instanceof Error ? error.message : "";
+                  const status = downloadSource === "http" && !aborted ? refusedStatus(segment.url) : undefined;
                   logWarn("P2P", "segment error", {
                     seg: eng.lastErrorSeg, source: downloadSource, error: eng.lastError,
                     ...(message && message !== eng.lastError ? { message } : {}),
+                    ...(status !== undefined ? { httpStatus: status } : {}),
                     ...(failedSegs.get(segment.url) ? { failures: failedSegs.get(segment.url) } : {}),
                   });
                 });
@@ -5411,8 +5417,11 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                   // hint — see lib/loadingMessage.
                   if ((hlsRef.current as unknown) === hls) downloadSamplesRef.current.push([eng.lastChunkAt, bytesLength]);
                 });
-                hls.p2pEngine.addEventListener("onChunkUploaded", (bytesLength) => {
+                hls.p2pEngine.addEventListener("onChunkUploaded", (bytesLength, peerId) => {
                   stats.uploadBytes += bytesLength;
+                  // To whom, for the Theater Dashboard: the player its peer id names.
+                  const to = playerKeyOf(peerId);
+                  if (to) stats.uploadTo.set(to, (stats.uploadTo.get(to) ?? 0) + bytesLength);
                 });
                 // What the engine holds, by film time — see downloadedAheadS.
                 // Everything it fetches ahead stays in its memory until the
@@ -7186,6 +7195,13 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           peers: stats.peers.size,
           p2pMB: stats.p2pBytes / 1e6,
           httpMB: stats.httpBytes / 1e6,
+          // What this player sent the others, in all and to each by their
+          // player key, and its own key: the dashboard's who shared with whom.
+          peerKey: playerKeyOf(peerIdPrefix(selfUserIdRef.current)),
+          ...(stats.uploadBytes > 0 ? {
+            upMB: Number((stats.uploadBytes / 1e6).toFixed(3)),
+            upTo: Object.fromEntries([...stats.uploadTo].map(([k, b]) => [k, Number((b / 1e6).toFixed(3))])),
+          } : {}),
           // What Discord's cache has handed this page, of all it answered
           // (lib/segmentParts edgeTotals): the rest came from the bot.
           ...(edge.of ? {
@@ -7228,7 +7244,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         lastTickTimeRef.current = v.currentTime;
         // currentTime > 1 excludes cold-start pre-roll, where sitting at 0
         // while the first segments arrive is buffering, not a wedge.
-        const wedged = v.currentTime > 1 && !v.paused && !v.seeking
+        const wedged = v.currentTime > 1 && waitsToPlay(v.paused, amHost && hostHeldRef.current) && !v.seeking
           && !advanced && bufferAheadSeconds(v) < 1;
         if (wedged && !stallLoggedRef.current) {
           stallLoggedRef.current = true;
@@ -7328,8 +7344,12 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         }
 
         // currentTime > 1 excludes cold start, where sitting at zero while the
-        // first segments arrive is buffering rather than a wedge.
-        const stuck = v.currentTime > 1 && !v.paused
+        // first segments arrive is buffering rather than a wedge. A host held
+        // for the room counts as playing: it is paused only until its own
+        // picture comes, and the room waits on it. On Verity (18 November) the
+        // segment after 7002.5 s never came, the host sat held, and nothing
+        // looked, since it was paused: buffering until somebody closed it.
+        const stuck = v.currentTime > 1 && waitsToPlay(v.paused, isHostRef.current && hostHeldRef.current)
           && !moved && bufferAheadSeconds(v) < 1;
         if (!stuck) {
           wedgeStuckSinceRef.current = 0;
@@ -7363,8 +7383,17 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         // that is the end of the stream, not a wedge, and no amount of
         // restarting the loader produces frames that don't exist. The last
         // net for a stream that stops short with no sign of it until now.
+        // Not while a segment is still being waited for and the stream hasn't
+        // been rebuilt here yet: that is the way to the bot failing, which a
+        // rebuild gets past (see mayEndAtBreak). On Verity a new stream from
+        // just past the stall played on to the end.
         const pictureEnd = pictureEndsAtS(v, v.currentTime);
-        if (pictureEnd !== null && endTitleAtBreak?.(pictureEnd)) return;
+        const loaderWaiting = hlsLoadingState(hls).hlsState === "FRAG_LOADING"
+          || Date.now() - engineLoaderRef.current.lastErrorAt < WEDGE_CHECK_MS * 5;
+        const rebuiltHere = wedgeRebuiltAtRef.current !== null && Math.abs(v.currentTime - wedgeRebuiltAtRef.current) < 10;
+        const rebuildsLeft = !rebuiltHere && (ownsSessionRef.current
+          ? recoveryAttemptRef.current < MAX_RECOVERY_ATTEMPTS : retryCountRef.current < MAX_VIEWER_RETRIES);
+        if (pictureEnd !== null && mayEndAtBreak(loaderWaiting, rebuildsLeft) && endTitleAtBreak?.(pictureEnd)) return;
 
         if (Date.now() - wedgeLastAtRef.current > WEDGE_RESET_MS) {
           wedgeRecoveriesRef.current = 0;
@@ -7375,6 +7404,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         if (wedgeRecoveriesRef.current > MAX_WEDGE_RECOVERIES) {
           wedgeRecoveriesRef.current = 0;
           const at = v.currentTime;
+          wedgeRebuiltAtRef.current = at;
           if (ownsSessionRef.current) {
             // Same as the host's recovery restart: a fresh transcode from here.
             logError("Stall", "wedge recovery exhausted, restarting the stream here", {
@@ -8949,7 +8979,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     // The host still ends the room's playback, which stops every stream — that
     // is a decision about the room rather than about this client's tab.
     if (isHostRef.current) {
-      syncActionsRef.current?.sendStop();
+      syncActionsRef.current?.sendStop(reason === "item finished" ? "finished" : "closed");
     } else {
       logEvent("Player", "leaving the player, stream left running", {
         session: sessionIdRef.current?.substring(0, 8) ?? "none",
@@ -9174,6 +9204,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   const handleSkipMarker = useCallback(() => {
     if (!activeMarker) return;
     setActiveMarker(null); // instant feedback; the timeupdate tick would clear it ~250ms later
+    noteSeekCause(activeMarker.type === "credits" ? "skip credits" : "skip intro");
     handleSeekCommand(activeMarker.end);
   }, [activeMarker, handleSeekCommand]);
 
@@ -9183,7 +9214,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    * running to the end no longer advances on its own.
    */
   /** Switch the room to a specific item. Co-hosts relay; the host performs it. */
-  const playItem = useCallback((target: QueueItem | null, fromQueue = false) => {
+  const playItem = useCallback((target: QueueItem | null, fromQueue = false, cause?: PlayCause) => {
     if (!target) return;
     // Starting a title is host-only server-side, so a co-host asks the host to
     // do it rather than changing its own view to no room-wide effect.
@@ -9202,6 +9233,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       carryTrackPrefs(observed.prefs);
     }
     if (fromQueue) syncActionsRef.current?.sendQueueRemove(target.ratingKey);
+    if (cause) notePlayCause(fromQueue ? "queue" : cause, target.ratingKey);
     onPlayNext?.(target);
   }, [onPlayNext]);
 
@@ -9209,21 +9241,23 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    * The card's action: a queued item wins over the resolved sibling, since it's
    * a deliberate choice rather than a guess.
    */
-  const playNextItem = useCallback(() => {
+  const playNextItem = useCallback((cause: PlayCause = "up next") => {
     const queue = syncStateRef.current?.queue;
     const queued = queue && queue.length > 0 ? queue[0] : null;
-    if (queued) playItem(queued, true);
-    else playItem(toQueueItem(nextEpisodeRef.current, subtitlesOnRef.current));
+    if (queued) playItem(queued, true, cause);
+    else playItem(toQueueItem(nextEpisodeRef.current, subtitlesOnRef.current), false, cause);
   }, [playItem, subtitles]);
+  const playNextFromEndScreen = useCallback(() => playNextItem("end screen"), [playNextItem]);
+  const playNextFromCard = useCallback(() => playNextItem("up next"), [playNextItem]);
 
   // Control-bar episode navigation. Deliberately ignores the queue: these mean
   // "move through the series", not "play whatever is queued next".
   const playPrevEpisode = useCallback(() => {
-    playItem(toQueueItem(prevEpisodeRef.current, subtitlesOnRef.current));
+    playItem(toQueueItem(prevEpisodeRef.current, subtitlesOnRef.current), false, "previous episode");
   }, [playItem, subtitles]);
 
   const playNextEpisode = useCallback(() => {
-    playItem(toQueueItem(nextEpisodeRef.current, subtitlesOnRef.current));
+    playItem(toQueueItem(nextEpisodeRef.current, subtitlesOnRef.current), false, "next episode");
   }, [playItem, subtitles]);
 
   const playItemRef = useRef(playItem);
@@ -9774,7 +9808,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         <EndCard
           item={upNextItem}
           source={queuedNext ? "queue" : "series"}
-          onPlay={canControl ? playNextItem : undefined}
+          onPlay={canControl ? playNextFromEndScreen : undefined}
           onExit={exitToShow}
           onClose={isPip ? handleBack : undefined}
           compact={isPip}
@@ -10166,7 +10200,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             <NextUpButton
               item={upNextItem}
               source={queuedNext ? "queue" : "series"}
-              onPlay={playNextItem}
+              onPlay={playNextFromCard}
               onDismiss={() => {
                 // Dismissing a queued item drops it from the queue (the old
                 // Cancel behaviour), which correctly falls through to the

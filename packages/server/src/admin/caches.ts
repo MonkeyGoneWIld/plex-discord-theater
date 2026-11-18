@@ -236,7 +236,7 @@ export async function cachesView(recorder: Recorder | null): Promise<{
       bytes: sum(pgs),
       limitBytes: pictureSubtitlesMaxBytes(),
       items: pgs.length,
-      kept: "Above FFMPEG_PGS_MAX_GB, the least recently used are removed first. Unused for 60 days: removed.",
+      kept: "Above FFMPEG_PGS_MAX_GB, the least recently used are removed first. Items unused for 60 days are removed.",
       list: pgs.slice(0, LIST).map((f) => ({ name: f.name, ratingKey: null, title: null, bytes: f.bytes, at: f.at })),
       listNote: note(LIST, pgs.length),
     },

@@ -284,6 +284,32 @@ export function installSegmentParts(target: { fetch: Fetch } = window): void {
  * A whole segment: what is kept of it, or fetched — in parts if it is marked
  * so — and kept as it is handed on.
  */
+/**
+ * The status of the last answer that wasn't a segment, by its URL. The P2P
+ * engine's error for one says only "http-error", with the status text for its
+ * message — empty over HTTP/2 — so its log never said what came back
+ * (Verity, 18 November: the same segment refused again and again, and no
+ * telling by whom or how).
+ */
+const refused = new Map<string, number>();
+let lastRefused: { url: string; status: number; at: number } | null = null;
+
+/** What the last refusal of this segment was: its HTTP status. */
+export function refusedStatus(url: string, now = Date.now()): number | undefined {
+  const s = refused.get(url);
+  if (s !== undefined) return s;
+  // Asked for under another URL (a fresh one, or in parts): the latest, if just now.
+  return lastRefused && now - lastRefused.at < 2_000 ? lastRefused.status : undefined;
+}
+
+/** Note a refusal, for refusedStatus. */
+export function noteRefused(url: string, status: number, now = Date.now()): void {
+  refused.delete(url);
+  refused.set(url, status);
+  if (refused.size > 200) refused.delete(refused.keys().next().value!);
+  lastRefused = { url, status, at: now };
+}
+
 async function fetchKeeping(
   native: Fetch,
   request: Request,
@@ -298,6 +324,7 @@ async function fetchKeeping(
     edgeAnswers.delete(request.url);
     noteEdge(request.url, response);
   }
+  if (!response.ok) noteRefused(request.url, response.status);
   if (response.status !== 200 || !response.body || !keepingSegments() || !roomToKeep()) return response;
   const [handedOn, toKeep] = response.body.tee();
   void keepSegment(request.url, toKeep, response.headers.get("Content-Type"), mark?.bytes ?? segmentBytesOf(request.url));

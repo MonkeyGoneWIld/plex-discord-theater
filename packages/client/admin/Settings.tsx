@@ -12,7 +12,7 @@ const GROUPS: Array<[string, RegExp, string]> = [
   ["Playback and quality", /^(DIRECT_STREAM|VIDEO_|AUDIO_|QUALITY|.*BITRATE)/, "What is sent unchanged, and the bitrates used when transcoding."],
   ["Caches and storage", /^(THUMB_|WARM_|.*CACHE|DATA_|PREVIEW)/, "Where data is kept, how much, and for how long."],
   ["Integrations", /^(SEERR_|TMDB_|TVDB_|QBT_|TRAKT_)/, "Seerr requests, TMDB and TVDB metadata, and the qBittorrent manager."],
-  ["Dashboard", /^ADMIN_/, "This dashboard, its port and its password."],
+  ["Dashboard", /^ADMIN_/, "The Theater Dashboard, its port and password."],
   ["Logging", /^(LOG_|DEBUG)/, "Log files and their detail."],
   ["Server", /^(PORT|NODE_ENV|SESSION_|HOST|TRUST_|TZ)/, "The Activity's own web server."],
 ];
@@ -75,8 +75,8 @@ export function Settings({ onError }: { onError: (e: unknown) => void }) {
           <span className="muted small">{total} of {data.settings.length} settings are set</span>
         </div>
         <p className="note">
-          These are the environment settings the server reads, shown for reference. To change one, edit it in your Docker Compose
-          file or <span className="mono">.env</span> and restart the container. Passwords, keys and tokens only show whether they are set.
+          Read-only. To change a setting, edit your Docker Compose file or <span className="mono">.env</span> and restart the container.
+          Secret values are not shown.
         </p>
         <div className="toolbar config-tools">
           <label className="grow">
@@ -168,7 +168,7 @@ function HistoryFile({ onError }: { onError: (e: unknown) => void }) {
       <p className="history-actions">
         <a className="button ghost" href="/api/export/admin.sqlite" download>Download database (admin.sqlite)</a>
         <span className="muted small">
-          A snapshot taken when you click, for backup or your own queries. Each list can also be exported as CSV or JSON from its page.
+          A snapshot of the database at the time of download. Individual lists can be exported as CSV or JSON from their pages.
         </span>
       </p>
 

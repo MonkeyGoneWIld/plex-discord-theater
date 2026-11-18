@@ -10,7 +10,7 @@ import { Places } from "./Places";
 import { Requests } from "./Requests";
 import { Caches } from "./Caches";
 import { GraphsTab } from "./lazy";
-import { timeOfDay, zoneLabel } from "./format";
+import { timeOfDay } from "./format";
 import { Icon, Logo } from "./icons";
 
 type Tab = "now" | "history" | "graphs" | "people" | "places" | "requests" | "caches" | "logs" | "settings";
@@ -56,7 +56,7 @@ function SignIn({ onDone }: { onDone: () => void }) {
         }
       }}>
         <div className="signin-brand"><Logo size={40} /><h1>Theater Dashboard</h1></div>
-        <p className="muted">Sign in with the password set in the server's <span className="mono">ADMIN_PASSWORD</span>.</p>
+        <p className="muted">Enter the password set in <span className="mono">ADMIN_PASSWORD</span>.</p>
         <label className="stack">
           <span>Password</span>
           <input type="password" autoFocus autoComplete="current-password" value={password}
@@ -144,7 +144,7 @@ export function App() {
           ))}
         </nav>
         <div className="sidebar-foot">
-          <span className={`live ${live}`} title={data ? `Last update ${timeOfDay(data.at)}, your local time (${zoneLabel()})` : ""}>
+          <span className={`live ${live}`}>
             <span className="dot" />{live === "live" ? "Live" : live === "lost" ? "Reconnecting…" : "Connecting…"}
             {data && <span className="muted"> · {timeOfDay(data.at)}</span>}
           </span>

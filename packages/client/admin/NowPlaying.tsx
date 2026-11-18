@@ -6,7 +6,7 @@ import { switchedText, trackName } from "./events";
 import { StreamCard, type StreamInfo } from "./streams";
 import { Icon } from "./icons";
 import { Poster, titleLine, useTitles } from "./titles";
-import { Avatar, bps, FlowChart, pct, Progress, SOURCES, Spark, SplitBar, Stat, type FlowPoint } from "./viz";
+import { Avatar, bps, FlowChart, pct, Progress, ShareList, SOURCES, Spark, SplitBar, Stat, type FlowPoint } from "./viz";
 
 /** What a player can decode (ffmpeg/plan.ts, PLAYER_CAPS), by name. */
 const CAP_LABELS: Record<string, string> = {
@@ -50,7 +50,7 @@ const listed = (names: string[]) => (names.length < 2 ? names.join("") : `${name
 /** A room everybody has left, in a sentence: who it is kept for. */
 function heldNote(room: Room): string {
   const host = known(room, room.heldFor?.hostUserId ?? room.discord.hostUserId);
-  return `Everyone has left. The session is kept for a short time so ${host ?? "the host"} can return and continue from where they stopped.`;
+  return `All viewers have left. The session is being held briefly so that ${host ?? "the host"} can resume where they left off.`;
 }
 
 /** Viewers who left a stream of their own a moment ago: by name, or by how many when a name isn't known. */
@@ -58,7 +58,7 @@ function awayNote(room: Room): string {
   const n = room.away.length;
   const names = room.away.map((a) => known(room, a.userId)).filter((name): name is string => !!name);
   const who = names.length === n ? listed(names) : n === 1 ? "A viewer" : `${n} viewers`;
-  return `${who} left a moment ago. ${n === 1 ? "Their stream is" : "Their streams are"} kept briefly in case they return.`;
+  return `${who} left recently. ${n === 1 ? "Their stream is" : "Their streams are"} being held briefly in case they return.`;
 }
 
 /** What a room's players need each second to keep playing: each watched stream's bitrate, once a viewer. Nothing while paused. */
@@ -99,20 +99,16 @@ const forS = (ms: number | null | undefined) => (ms ? ` · ${Math.round(ms / 100
  * the start or after a seek is not buffering, and neither is a player with
  * under 15 seconds in hand that is still playing (the room's "loading").
  */
-function status(c: Client): { text: string; tone: string; title?: string } {
+function status(c: Client): { text: string; tone: string } {
   if (!c.connected) return { text: "Disconnected", tone: "bad" };
   if (c.away) return { text: "Away", tone: "muted" };
   const p = c.player;
-  if (p?.stall === "buffering") return { text: `Buffering${forS(p.sinceMs)}`, tone: "warn", title: "Their player stopped to wait for data" };
-  if (p?.stall === "start") return { text: `Loading${forS(p.sinceMs)}`, tone: "muted", title: "Their player is loading the start" };
-  if (p?.stall === "seek") return { text: `Loading after a seek${forS(p.sinceMs)}`, tone: "muted" };
-  if (p === undefined && c.loading) {
-    // Not recorded: only the room's word, that they have under 15 s in hand.
-    return { text: "Filling buffer", tone: "muted", title: "Under 15 seconds of picture loaded ahead" };
-  }
-  if (c.watching) {
-    return { text: "Watching", tone: "good", title: c.loading ? "Playing, with under 15 seconds of picture loaded ahead" : undefined };
-  }
+  if (p?.stall === "buffering") return { text: `Buffering${forS(p.sinceMs)}`, tone: "warn" };
+  if (p?.stall === "start") return { text: `Starting${forS(p.sinceMs)}`, tone: "muted" };
+  if (p?.stall === "seek") return { text: `Loading after seek${forS(p.sinceMs)}`, tone: "muted" };
+  // Not recorded: only the room's word, that they have under 15 s in hand.
+  if (p === undefined && c.loading) return { text: "Loading", tone: "muted" };
+  if (c.watching) return { text: "Watching", tone: "good" };
   return { text: "Browsing", tone: "muted" };
 }
 
@@ -128,7 +124,7 @@ function Viewers({ room, tracks }: { room: Room; tracks: Record<string, string> 
         <thead>
           <tr>
             <th>Viewer</th><th>Status</th><th>Stream</th>
-            {recorded && <><th>Watched</th><th>Data received</th><th>Buffering</th></>}
+            {recorded && <><th>Watched</th><th>Data received</th><th className="num">Sent to viewers</th><th>Buffering</th></>}
             <th aria-label="Details" />
           </tr>
         </thead>
@@ -149,16 +145,17 @@ function Viewers({ room, tracks }: { room: Room; tracks: Record<string, string> 
                       </span>
                     </span>
                   </td>
-                  <td><span className={`health ${st.tone}`} title={st.title}><span className={`dot ${st.tone}`} />{st.text}</span></td>
+                  <td><span className={`health ${st.tone}`}><span className={`dot ${st.tone}`} />{st.text}</span></td>
                   <td>{on ? <span className="nowrap">Stream {on.n} <DecisionBadge s={{ ...on.s, started: !!on.s.hlsSessionId }} /></span> : "—"}</td>
                   {recorded && (c.data
-                    ? <><td className="nowrap">{clock(c.data.watchedS)}</td><td><DataCell d={c.data} /></td><td><BufferingCell d={c.data} /></td></>
-                    : <><td>—</td><td>—</td><td>—</td></>)}
+                    ? <><td className="nowrap">{clock(c.data.watchedS)}</td><td><DataCell d={c.data} /></td>
+                      <td className="num">{c.data.upBytes > 0 ? bytes(c.data.upBytes) : "—"}</td><td><BufferingCell d={c.data} /></td></>
+                    : <><td>—</td><td>—</td><td>—</td><td>—</td></>)}
                   <td className="chev-cell"><span className={`chev${shown ? " open" : ""}`}><Icon name="chevron" size={16} /></span></td>
                 </tr>
                 {shown && (
                   <tr className="detail-row">
-                    <td colSpan={recorded ? 7 : 4}>
+                    <td colSpan={recorded ? 8 : 4}>
                       <dl className="grid">
                         <dt>Discord user ID</dt><dd className="mono">{c.userId}</dd>
                         <dt>Joined</dt><dd>{dateTime(c.joinedAt)} ({ago((Date.now() - c.joinedAt) / 1000)} ago)</dd>
@@ -166,13 +163,14 @@ function Viewers({ room, tracks }: { room: Room; tracks: Record<string, string> 
                         <dt>Quality limit</dt><dd>{quality(c.quality)}</dd>
                         <dt>Subtitle track</dt>
                         <dd>{trackName({ tracks }, c.subtitleStreamId, "Off")}{c.subtitleStreamId ? <> <span className="mono muted">{c.subtitleStreamId}</span></> : null}</dd>
-                        <dt>Player can decode</dt>
-                        <dd>{c.caps.length ? c.caps.map((cap) => CAP_LABELS[cap] ?? cap).join(", ") : "H.264 and AAC only"}{c.av1Encode ? " · can encode AV1" : ""}</dd>
+                        <dt>Supported formats</dt>
+                        <dd>{c.caps.length ? c.caps.map((cap) => CAP_LABELS[cap] ?? cap).join(", ") : "H.264 and AAC only"}{c.av1Encode ? " · AV1 encoding" : ""}</dd>
                         {c.data && (
                           <>
-                            <dt>From the server</dt><dd>{bytes(c.data.botBytes)}</dd>
-                            <dt>From Discord's cache</dt><dd>{bytes(Math.min(c.data.edgeHitBytes, c.data.httpBytes))}</dd>
-                            <dt>From other viewers</dt><dd>{bytes(c.data.p2pBytes)}</dd>
+                            <dt>Received from the server</dt><dd>{bytes(c.data.botBytes)}</dd>
+                            <dt>Received from Discord's cache</dt><dd>{bytes(Math.min(c.data.edgeHitBytes, c.data.httpBytes))}</dd>
+                            <dt>Received from other viewers</dt><dd>{bytes(c.data.p2pBytes)}</dd>
+                            <dt>Sent to other viewers</dt><dd>{bytes(c.data.upBytes)}</dd>
                           </>
                         )}
                       </dl>
@@ -229,8 +227,7 @@ function Session({ room, durationS, sub, tracks }: { room: Room; durationS: numb
               <h3>{room.title ?? `Plex item ${room.ratingKey}`}</h3>
               {sub && <div className="session-sub">{sub}</div>}
             </div>
-            <span className={`badge big ${STATE[state].tone}`}
-              title={state === "waiting" ? "The room waits only for the host's picture; viewers who aren't ready catch up while it plays" : undefined}>
+            <span className={`badge big ${STATE[state].tone}`}>
               <span className={`dot ${STATE[state].tone}`} />{stateLabel(room, state)}
             </span>
           </div>
@@ -240,14 +237,14 @@ function Session({ room, durationS, sub, tracks }: { room: Room; durationS: numb
             <div className="kpi"><span className="kpi-label">Streams</span><span className="kpi-value">{room.streams.length}</span>
               <span className="kpi-sub">{room.streams.filter((s) => s.decision === "transcode").length} transcoding</span></div>
             <div className="kpi"><span className="kpi-label">Required bitrate</span><span className="kpi-value">{required ? bps(required) : "—"}</span>
-              <span className="kpi-sub">{room.playing ? "all viewers combined" : "nothing while paused"}</span></div>
+              <span className="kpi-sub">{room.playing ? "All viewers combined" : "Paused"}</span></div>
             {recorded && (
               <>
                 <div className="kpi"><span className="kpi-label">Data delivered</span><span className="kpi-value">{bytes(totals.total)}</span>
-                  <span className="kpi-sub">{pct(totals.cache + totals.peers, totals.total)}% not from the server</span></div>
+                  <span className="kpi-sub">{pct(totals.cache + totals.peers, totals.total)}% offloaded from the server</span></div>
                 <div className={`kpi ${health}`}><span className="kpi-label">Buffering</span>
                   <span className="kpi-value">{totals.stalls === 0 ? "None" : `${totals.stalls} ${totals.stalls === 1 ? "event" : "events"}`}</span>
-                  <span className="kpi-sub">{totals.stalls ? `${clock(totals.stalledMs / 1000)} in total` : "playback is smooth"}{totals.errors ? ` · ${totals.errors} errors` : ""}</span></div>
+                  <span className="kpi-sub">{totals.stalls ? `${clock(totals.stalledMs / 1000)} in total` : "No interruptions"}{totals.errors ? ` · ${totals.errors} errors` : ""}</span></div>
               </>
             )}
           </div>
@@ -255,7 +252,7 @@ function Session({ room, durationS, sub, tracks }: { room: Room; durationS: numb
         {recorded && (
           <div className="session-flow">
             <div className="panel-head">
-              <h4>Delivery · last 10 minutes</h4>
+              <h4>Delivery, last 10 minutes</h4>
               <ul className="legend">
                 {SOURCES.map((s) => <li key={s.key}><span className="swatch" style={{ background: s.color }} />{s.label}</li>)}
                 <li><span className="swatch dashed" />Required</li>
@@ -265,7 +262,7 @@ function Session({ room, durationS, sub, tracks }: { room: Room; durationS: numb
               {SOURCES.map((s, i) => (
                 <span key={s.key}><span className="swatch" style={{ background: s.color }} /><strong>{bps(now ? now[i + 1] : 0)}</strong></span>
               ))}
-              {required > 0 && <span className="muted">needs {bps(required)}</span>}
+              {required > 0 && <span className="muted">Required: {bps(required)}</span>}
             </div>
             <FlowChart points={points} requiredBps={required || null} stepS={room.flow?.stepS ?? 10} />
           </div>
@@ -274,8 +271,15 @@ function Session({ room, durationS, sub, tracks }: { room: Room; durationS: numb
 
       {recorded && (
         <div className="session-block">
-          <h4>Where the data came from · this session</h4>
+          <h4>Data sources for this session</h4>
           <SplitBar server={totals.server} cache={totals.cache} peers={totals.peers} />
+        </div>
+      )}
+
+      {recorded && (room.shares?.length ?? 0) > 0 && (
+        <div className="session-block">
+          <h4>Peer-to-peer sharing for this session</h4>
+          <ShareList shares={room.shares ?? []} nameOf={(id) => nameOf(room, id)} />
         </div>
       )}
 
@@ -297,7 +301,7 @@ function Session({ room, durationS, sub, tracks }: { room: Room; durationS: numb
           {!room.held && room.away.length > 0 && <p className="note">{awayNote(room)}</p>}
           {room.queue.length > 0 && (
             <details className="queue">
-              <summary>Up next ({room.queue.length})</summary>
+              <summary>Queue ({room.queue.length})</summary>
               <ol>{room.queue.map((q, i) => <li key={`${q.ratingKey}-${i}`}>{q.title} <span className="muted">{q.type}</span></li>)}</ol>
             </details>
           )}
@@ -314,7 +318,7 @@ function Facts({ room, watching }: { room: Room; watching: number }) {
       <span className="fact"><Icon name="people" size={14} /><strong>{watching}</strong> of {room.clients.length} watching</span>
       <span className="fact"><Icon name="places" size={14} />Server <strong><PlaceName kind="guild" id={room.discord.guildId} /></strong></span>
       <span className="fact">Channel <strong><PlaceName kind="channel" id={room.discord.channelId} /></strong></span>
-      <span className="fact" title={`The Activity's room in Discord: instance ${room.id}`}><Icon name="clock" size={14} />Opened {dateTime(room.discord.startedAt)}</span>
+      <span className="fact"><Icon name="clock" size={14} />Opened {dateTime(room.discord.startedAt)}</span>
       {room.playId ? <a className="fact" href={`#history/${room.playId}`}>Session timeline →</a> : null}
     </div>
   );
@@ -346,7 +350,7 @@ export function NowPlaying({ data }: { data: Overview | null }) {
     <>
       <div className="page-head">
         <h1>Now Playing</h1>
-        <p className="muted">Every active room, updated live. Times are in your local time ({zoneLabel()}).</p>
+        <p className="muted">Active rooms, updated in real time. Times are shown in your local time zone ({zoneLabel()}).</p>
       </div>
       <div className="stats">
         <Stat icon={<Icon name="now" />} label="Active sessions" value={playing.length}
@@ -356,12 +360,12 @@ export function NowPlaying({ data }: { data: Overview | null }) {
         <Stat icon={<Icon name="stream" />} label="Streams" value={t.streams}
           sub={<><span className="good-text">{t.copied} direct</span> · <span className={t.reencoded ? "warn-text" : ""}>{t.reencoded} transcoding</span></>} />
         <Stat icon={<Icon name="upload" />} label="Server upload" value={recorded ? bps(last ? last[1] : 0) : rate(t.feedKbps)}
-          sub={recorded ? `Players need ${bps(required)} in total` : "Required bitrate of all streams"}>
+          sub={recorded ? `Required: ${bps(required)}` : "Required bitrate of all streams"}>
           {recorded && <Spark values={flow.map((p) => p[1])} />}
         </Stat>
         {recorded && (
-          <Stat icon={<Icon name="split" />} label="Delivery right now" value={last ? `${pct(last[2] + last[3], last[1] + last[2] + last[3])}% offloaded` : "—"}
-            sub="Share served by Discord's cache and peers">
+          <Stat icon={<Icon name="split" />} label="Current offload" value={last ? `${pct(last[2] + last[3], last[1] + last[2] + last[3])}%` : "—"}
+            sub="Served by Discord's cache and peers">
             {last && <SplitBar server={last[1]} cache={last[2]} peers={last[3]} legend={false} fmt={bps} />}
           </Stat>
         )}
@@ -375,7 +379,7 @@ export function NowPlaying({ data }: { data: Overview | null }) {
           <section className="card empty-state">
             <Icon name="film" size={36} />
             <h3>Nothing is playing</h3>
-            <p className="muted">A room appears here as soon as someone opens the Activity in Discord.</p>
+            <p className="muted">Rooms appear here when someone opens the Activity in Discord.</p>
           </section>
         )
         : data.rooms.map((r) => {

@@ -17,7 +17,7 @@ export function Caches({ onError }: { onError: (e: unknown) => void }) {
       <div className="page-head with-action">
         <div>
           <h1>Caches</h1>
-          <p className="muted">What the server stores, and how much Discord's cache saves it. Read at {timeOfDay(data.at)}.</p>
+          <p className="muted">Server storage and Discord cache efficiency. Updated at {timeOfDay(data.at)}.</p>
         </div>
         <button className="ghost" onClick={reload} disabled={busy}>{busy ? "Refreshing…" : "Refresh"}</button>
       </div>
@@ -102,8 +102,8 @@ function Discord({ d }: { d: CachesResult["discord"] }) {
     <section className="card">
       <h3>Discord cache efficiency</h3>
       <p className="muted small">
-        Video segments reach players through Discord's proxy, which caches them. A segment already in its cache is
-        served without reaching this server. Figures are reported by the players.
+        Video segments are delivered through Discord's media proxy, which caches them. Cached segments are served
+        without contacting this server. Figures are reported by viewers' players.
       </p>
       <div className="tiles">
         <SumTile label="Last 24 hours" s={d.day} />
@@ -111,7 +111,7 @@ function Discord({ d }: { d: CachesResult["discord"] }) {
         <SumTile label="All time" s={d.all} />
       </div>
       <h4>By title</h4>
-      {d.titles.length === 0 ? <p className="muted">No sessions recorded yet.</p> : (
+      {d.titles.length === 0 ? <p className="muted">No sessions have been recorded.</p> : (
         <div className="table-wrap">
           <table className="table">
             <thead>

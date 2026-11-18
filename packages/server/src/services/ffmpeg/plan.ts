@@ -515,16 +515,25 @@ function untilArgs(toS: number | null): string[] {
   return toS !== null ? ["-to", toS.toFixed(3)] : [];
 }
 
-/** The audio as it is, or as convertedAudio has it. */
-function audioArgs(plan: { audio: SourceStream | null; audioCopy: boolean; audioOut: AudioOut | null }): string[] {
+/**
+ * The audio as it is, or as convertedAudio has it.
+ *
+ * Converted sound goes on as silence to the end of the picture (apad, with
+ * -shortest to stop at the picture's end). A browser plays only as far as both
+ * the picture and the sound are in, so a file whose sound stops early stalls
+ * there for good: Verity's sound ends at 7002.8 s, its picture at 7256.8 s,
+ * and the player sat "buffering" at 7002.8 (18 November), or took it for the
+ * end of a broken stream and ended the film four minutes early (15 November).
+ */
+export function audioArgs(plan: { audio: SourceStream | null; audioCopy: boolean; audioOut: AudioOut | null }): string[] {
   if (!plan.audio) return [];
   if (plan.audioCopy) return ["-c:a", "copy"];
   const out = plan.audioOut ?? { codec: "aac", channels: 2, kbps: AUDIO_KBPS };
-  if (out.codec === "flac") return ["-c:a", "flac", "-af", "aresample=async=1"];
+  if (out.codec === "flac") return ["-c:a", "flac", "-af", "aresample=async=1,apad", "-shortest"];
   // libopus takes 7.1 and 6.1 in their standard layouts, which -ac makes of
   // the others (7.1 wide); it picks its sample rate, 48 kHz.
   return ["-c:a", out.codec === "opus" ? "libopus" : "aac", "-ac", String(out.channels), "-b:a", `${out.kbps}k`,
-    "-af", "aresample=async=1"];
+    "-af", "aresample=async=1,apad", "-shortest"];
 }
 
 /**

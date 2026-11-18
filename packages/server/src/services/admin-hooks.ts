@@ -26,6 +26,16 @@ export interface TransportEvent {
   /** The title, after the command; for a stop, the title it stopped. */
   ratingKey: string | null;
   title: string | null;
+  /**
+   * What the command came from, as the player said (see sync.ts, CAUSES): a
+   * seek's "skip intro" or "timeline", a stop's "finished" or "closed", a new
+   * title's "next episode" or "picked". Null when it didn't say.
+   */
+  cause?: string | null;
+  /** A play that only rebuilt the stream of the title already playing: not a start. */
+  rebuild?: boolean;
+  /** For a new title a co-host asked the host for: who asked. */
+  askedBy?: string | null;
 }
 
 export interface ClientLogEntry {

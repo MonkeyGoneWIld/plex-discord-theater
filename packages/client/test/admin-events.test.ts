@@ -7,7 +7,7 @@
  * the room waits only for the host; a player loading the start was
  * "buffering"; tracks were numbers; and the oldest came first.
  */
-import { eventText, eventTone, groupOf, newestFirst, positionAt, streamDiff, trackName, unionParts, variantParts } from "../admin/events";
+import { eventDetails, eventText, eventTone, groupOf, newestFirst, positionAt, streamDiff, trackName, unionParts, variantParts } from "../admin/events";
 import type { PlayEvent, TrackPoint } from "../admin/types";
 
 let pass = 0;
@@ -42,7 +42,7 @@ check("their own change: from which to which, and what changed",
   "robin moved from Stream 1 to Stream 2 (audio English (AAC Stereo), subtitles English (SRT)): a change of subtitles");
 check("subtitles by name; a track not known by number; none is off",
   [eventText(ev("subtitles", { from: 0, to: 3 }), ctx), trackName(ctx, 9), trackName(ctx, 0), trackName(undefined, 2)],
-  ["robin changed subtitles from off to English (SRT)", "track 9", "off", "track 2"]);
+  ["robin changed the subtitles from off to English (SRT)", "track 9", "off", "track 2"]);
 check("a stream's key in parts, and what differs between two",
   [variantParts("135836:0@8000/h264"), streamDiff("1:0@8000", "2:3"), streamDiff("1:0", "1:0"), variantParts("nonsense")],
   [{ audio: 135836, subtitle: 0, quality: 8000, format: "/h264" }, ["audio", "subtitles", "quality"], [], null]);
@@ -53,15 +53,65 @@ check("the room waits for the host's picture, and says after what",
     eventText(ev("room waited", { ms: 1_500, why: "a seek" }, null)),
     eventText(ev("room waited", { ms: 2_000, why: "something new" }, null)),
     eventText(ev("room waited", { ms: 2_000 }, null))],
-  ["Playback waited 4.0 s for the host's picture after the host changed the audio",
-    "Playback waited 1.5 s for the host's picture after a seek",
-    "Playback waited 2.0 s for the host's picture (something new)",
-    "Playback waited 2.0 s for the host's picture"]);
+  ["Playback waited 4.0 s for the host's video after the host changed the audio",
+    "Playback waited 1.5 s for the host's video after a seek",
+    "Playback waited 2.0 s for the host's video (something new)",
+    "Playback waited 2.0 s for the host's video"]);
 const start = ev("loaded at start", { ms: 3_000 });
 const stall = ev("buffering", { ms: 3_000 });
 check("loading the start is said as that, among loading and errors, and not marked as a problem",
   [eventText(start), groupOf(start), eventTone(start), eventText(stall), eventTone(stall)],
-  ["robin loaded for 3.0 s as they started", "problems", "", "robin buffered for 3.0 s", "warn"]);
+  ["robin's player took 3.0 s to load at the start", "problems", "", "robin was buffering for 3.0 s", "warn"]);
+
+// 17 November: a skip of the intro was "seeked"; how a title ended was
+// "playback was stopped" whatever had happened; the host's subtitles were
+// each viewer's own change; a stream "ended" with nothing to say why.
+console.log("\n— what each action came from —");
+check("a seek: the control it came from",
+  [eventText(ev("seek", { role: "host", fromS: 30, toS: 105, cause: "skip intro" }, "alex")),
+    eventText(ev("seek", { role: "co-host", fromS: 6_900, toS: 7_200, cause: "skip credits" }, "sam")),
+    eventText(ev("seek", { role: "host", fromS: 100, toS: 90, cause: "jump back" }, "alex")),
+    eventText(ev("seek", { role: "host", fromS: 100, toS: 500, cause: "timeline" }, "alex")),
+    eventText(ev("seek", { fromS: 100, toS: 500 }, "alex"))],
+  ["alex (host) used Skip Intro: 0:30 to 1:45", "sam (co-host) used Skip Credits: 1:55:00 to 2:00:00",
+    "alex (host) jumped back 10 s: 1:40 to 1:30", "alex (host) moved playback from 1:40 to 8:20 using the timeline",
+    "alex moved playback from 1:40 to 8:20"]);
+check("  a start: where it was started from, and whose request",
+  [eventText(ev("play", { role: "host", cause: "next episode" }, "alex")),
+    eventText(ev("play", { role: "host", cause: "co-host", askedBy: "sam" }, "alex")),
+    eventText(ev("play", { role: "host" }, "alex"))],
+  ["alex (host) started this title from Next Episode", "alex (host) started this title at sam's request", "alex (host) started playback"]);
+check("  a stop: closing the player, or the title finishing",
+  [eventText(ev("stop", { role: "host", cause: "closed" }, "alex")), eventText(ev("stop", { role: "host", cause: "finished" }, "alex"))],
+  ["alex (host) closed the player; playback stopped", "alex (host) reached the end of the title; playback stopped"]);
+check("how a session ended: finished, closed, the next episode, a co-host's request, another title",
+  [eventText(ev("ended", { reason: "stopped", cause: "finished", reachedEnd: true }, "alex")),
+    eventText(ev("ended", { reason: "stopped", cause: "closed" }, "alex")),
+    eventText(ev("ended", { reason: "another title", cause: "next episode", next: "Verity 2" }, "alex")),
+    eventText(ev("ended", { reason: "another title", cause: "co-host", next: "Verity 3", askedBy: "sam" }, "alex")),
+    eventText(ev("ended", { reason: "another title", cause: "picked", next: "Beast" }, "alex")),
+    eventText(ev("ended", { reason: "room closed" }, null))],
+  ["Session ended: the title finished", "Session ended: alex closed the player",
+    "Session ended: alex started the next episode, Verity 2", "Session ended: alex started Verity 3 at sam's request",
+    "Session ended: alex started a different title, Beast", "Session ended: all viewers left"]);
+check("reaching the end: of the title, or of a stream shorter than Plex says, which is playback",
+  [eventText(ev("reached the end", null)), eventText(ev("reached the end", { early: true, breakAtS: 7_002.5 })), groupOf(ev("reached the end", null))],
+  ["robin reached the end of the title",
+    "robin reached the end of the stream at 1:56:42, before the length Plex reports; playback was ended there", "playback"]);
+check("the host's subtitles: theirs, and whose followed",
+  [eventText(ev("subtitles", { from: 0, to: 3, byHost: true }, "alex"), ctx), eventText(ev("subtitles", { from: 0, to: 3, host: "alex" }, "sam"), ctx)],
+  ["alex (host) changed the subtitles from off to English (SRT)", "sam's subtitles changed from off to English (SRT), following alex (host)"]);
+check("why a stream ended: the host's change, or nobody left on it",
+  [eventText(ev("stream ended", { variant: "1:0", host: "alex", switching: "audio" }, null), ctx),
+    eventText(ev("stream ended", { variant: "1:3", unwatched: true }, null), ctx)],
+  ["Stream 1 ended after alex changed the audio", "Stream 2 ended: no viewers remained on it"]);
+check("an event's detail in words, not its field names",
+  [eventDetails(ev("seek", { role: "host", fromS: 30, toS: 105, cause: "skip intro" }, "alex")),
+    eventDetails(ev("ended", { reason: "another title", cause: "co-host", next: "Verity 3", askedBy: "sam" }, "alex")),
+    eventDetails(ev("stream changed", { from: "1:0", to: "2:0", audioStreamId: 2, subtitleStreamId: 0, session: "S1" }, "sam"), ctx)],
+  [[["Role", "Host"], ["From", "0:30"], ["To", "1:45"], ["Action", "Skip Intro"]],
+    [["Reason", "Another title was started"], ["Action", "A co-host's request"], ["Next title", "Verity 3"], ["Requested by", "sam"]],
+    [["From", "Stream 1"], ["To", "Stream 3"], ["Audio", "Japanese (AC3 5.1)"], ["Subtitles", "Off"], ["Stream session", "S1"]]]);
 
 console.log("\n— in order, and where in the title —");
 check("the newest first; at the same time, the later one",

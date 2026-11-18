@@ -150,13 +150,13 @@ export function StreamCard({ s }: { s: StreamInfo }) {
         <div className="stream-detail">
           <Group icon="film" title="Video">
             {row("Source", n.videoFrom ? String(n.videoFrom) : "—")}
-            {row("Output", transcoded ? (n.videoTo ? String(n.videoTo) : "Transcoded") : s.decision === "copy" ? "Unchanged (sent as it is in the file)" : "—")}
+            {row("Output", transcoded ? (n.videoTo ? String(n.videoTo) : "Transcoded") : s.decision === "copy" ? "Sent unchanged" : "—")}
             {row("Dynamic range", n.range ? String(n.range) : "—")}
             {transcoded && row("Reason", s.reason ?? "Not reported")}
             {transcoded && row("Encoder", n.encoder ? String(n.encoder) : "—")}
             {row("Video bitrate", n.kbps ? rate(Number(n.kbps)) : "—")}
             {n.allowed ? row("Bitrate limit", rate(Number(n.allowed))) : null}
-            {n.fallback ? row("Handled by Plex because", String(n.fallback)) : null}
+            {n.fallback ? row("Plex fallback reason", String(n.fallback)) : null}
           </Group>
           <Group icon="pulse" title="Audio">
             {row("Source", n.audioFrom ? String(n.audioFrom) : "—")}

@@ -7,6 +7,8 @@ export interface ViewerData {
   watchedS: number;
   httpBytes: number;
   p2pBytes: number;
+  /** What their player sent other viewers' players. */
+  upBytes: number;
   edgeBytes: number;
   edgeHitBytes: number;
   botBytes: number;
@@ -90,6 +92,23 @@ export interface Room {
   names?: Record<string, string>;
   /** Delivery over the last minutes: [time, server, Discord cache, peers], bits a second. */
   flow?: { stepS: number; windowS: number; points: Array<[number, number, number, number]> } | null;
+  /** What each viewer's player has sent another's in its session, most first. */
+  shares?: Share[];
+}
+
+/** What one viewer's player sent another's, by user id. */
+export interface Share {
+  from: string;
+  to: string;
+  bytes: number;
+}
+
+/** One person's sharing with another, on a person's page. */
+export interface SharePartner {
+  userId: string;
+  username: string | null;
+  bytes: number;
+  plays: number;
 }
 
 /** A title's poster and running time (admin/titles.ts). */
@@ -143,6 +162,8 @@ export interface Play {
   endedAt: number | null;
   endReason: string | null;
   endBy: string | null;
+  /** How it ended, where known: "finished", "closed", "next episode", "co-host", … */
+  endCause?: string | null;
   startPosS: number | null;
   lastPosS: number | null;
   playedS: number;
@@ -211,6 +232,8 @@ export interface PlayDetail {
   track?: TrackPoint[];
   /** What of the title each viewer watched: [from, to] in seconds of it, by user id. */
   watched?: Record<string, Array<[number, number]>>;
+  /** What each viewer's player sent another's, most first. */
+  shares?: Share[];
 }
 
 export interface PersonSummary extends ViewerData {
@@ -261,6 +284,9 @@ export interface PersonDetail {
   plays: PersonPlay[];
   requests: TitleRequest[];
   places: PersonPlace[];
+  /** Whom their player sent the most, and whose sent theirs the most. */
+  sentTo?: SharePartner[];
+  gotFrom?: SharePartner[];
 }
 
 export interface PlaceChannel {
@@ -387,7 +413,10 @@ export interface Graphs {
   hours: Array<{ hour: number; plays: number; playedS: number }>;
   weekdays: Array<{ weekday: number; plays: number; playedS: number }>;
   titles: Array<{ ratingKey: string; title: string | null; plays: number; people: number; watchedS: number }>;
-  people: Array<{ userId: string; username: string | null; plays: number; watchedS: number; bytes: number }>;
+  people: Array<{ userId: string; username: string | null; plays: number; watchedS: number; bytes: number; p2pBytes?: number; upBytes?: number }>;
+  /** Who sent other viewers the most, and between whom the most went. */
+  sharers?: Array<{ userId: string; username: string | null; plays: number; upBytes: number; p2pBytes: number }>;
+  pairs?: Array<{ from: string; fromName: string | null; to: string; toName: string | null; bytes: number }>;
   servers: Array<{ guildId: string | null; plays: number; people: number; watchedS: number }>;
   reasons: Array<{ reason: string; streams: number }>;
   upload: UploadRates & {

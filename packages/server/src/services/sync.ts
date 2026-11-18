@@ -330,6 +330,23 @@ interface RoomClient {
 const CO_HOST_ALLOWED_TYPES = new Set(["pause", "resume", "seek", "play-item"]);
 
 /**
+ * What a command may say it came from, for the Theater Dashboard's history:
+ * which button a seek was, whether a stop left a finished title, how the next
+ * title was chosen. Anything else is dropped, since the client says it.
+ */
+const CAUSES = {
+  seek: new Set(["skip intro", "skip credits", "timeline", "jump back", "jump forward"]),
+  stop: new Set(["closed", "finished"]),
+  play: new Set(["picked", "next episode", "previous episode", "up next", "end screen", "queue", "co-host"]),
+};
+const causeOf = (kind: keyof typeof CAUSES, v: unknown): string | null =>
+  typeof v === "string" && CAUSES[kind].has(v) ? v : null;
+
+/** A co-host's request for a title, by room, until the host plays it: who asked. */
+const playItemAsks = new WeakMap<object, { ratingKey: string; username: string | null; at: number }>();
+const PLAY_ITEM_ASK_MS = 120_000;
+
+/**
  * How often one viewer may ask the host to pause or resume.
  *
  * The request is a card on somebody else's screen while they are watching
@@ -2932,12 +2949,13 @@ export function attachWebSocketServer(server: Server): void {
       // recorder.ts), if it records: one refused or malformed isn't.
       const by = client;
       const inRoom = roomId;
-      const heard = (t: TransportType, ratingKey = room.state.ratingKey, title = room.state.title) => {
+      const heard = (t: TransportType, ratingKey = room.state.ratingKey, title = room.state.title,
+        more: { cause?: string | null; rebuild?: boolean; askedBy?: string | null } = {}) => {
         if (!adminHooks.on) return;
         adminHooks.transport({
           at: Date.now(), roomId: inRoom, type: t, userId: by.userId, username: by.username ?? null,
           role: by.isHost ? "host" : by.isCoHost ? "co-host" : "viewer",
-          fromS: commandFromS, toS: room.state.position, ratingKey, title,
+          fromS: commandFromS, toS: room.state.position, ratingKey, title, ...more,
         });
       };
 
@@ -3159,7 +3177,15 @@ export function attachWebSocketServer(server: Server): void {
           // whoever came with it gets a driver of their own for it.
           if (!itemChanged && hostWasOn && hostWasOn !== hostKey) settleLeftStream(room, hostWasOn);
           announceVariant(room, hostVariant);
-          heard("play");
+          // A new title: how it was chosen, and for a co-host's request, who
+          // asked. The same title again is its stream rebuilt — a track change,
+          // a seek's restart, a re-announcement — and nobody started anything.
+          const ask = playItemAsks.get(room);
+          const askedBy = itemChanged && ask && ask.ratingKey === rk && Date.now() - ask.at < PLAY_ITEM_ASK_MS ? ask.username : null;
+          if (itemChanged) playItemAsks.delete(room);
+          heard("play", undefined, undefined, itemChanged
+            ? { cause: askedBy ? "co-host" : causeOf("play", msg.cause), askedBy }
+            : { rebuild: true });
           break;
         }
         case "pause": {
@@ -3221,7 +3247,7 @@ export function attachWebSocketServer(server: Server): void {
             openGather(room);
             updateWaiting(room, roomId, "a seek");
           }
-          heard("seek");
+          heard("seek", undefined, undefined, { cause: causeOf("seek", msg.cause) });
           break;
         }
         case "play-item": {
@@ -3232,6 +3258,7 @@ export function attachWebSocketServer(server: Server): void {
           // the host's follow-up "play" does that.
           const ratingKey = msg.ratingKey;
           if (typeof ratingKey !== "string" || ratingKey.length > 50 || !/^\d+$/.test(ratingKey)) break;
+          playItemAsks.set(room, { ratingKey, username: client.username ?? null, at: Date.now() });
           for (const c of room.clients) {
             if (c.isHost) sendTo(c.ws, { type: "play-item", ratingKey });
           }
@@ -3275,7 +3302,7 @@ export function attachWebSocketServer(server: Server): void {
           if (stoppingSessionId) {
             killPlexTranscode(stoppingSessionId).catch(() => {});
           }
-          heard("stop", stoppedKey, stoppedTitle);
+          heard("stop", stoppedKey, stoppedTitle, { cause: causeOf("stop", msg.cause) });
           break;
         }
         case "heartbeat": {

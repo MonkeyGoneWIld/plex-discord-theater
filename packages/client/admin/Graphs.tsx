@@ -4,6 +4,7 @@ import type { GraphDay, Graphs as GraphData } from "./types";
 import { bytes, clock, dateTime, zoneLabel } from "./format";
 import { useLoad } from "./parts";
 import { usePlaceNames } from "./names";
+import { ShareList } from "./viz";
 import { Bars, byteUnit, ChartCard, COLORS, Columns, count, hours, SeriesTable, type Series } from "./charts";
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -86,7 +87,7 @@ function CustomPeriod({ onPick }: { onPick: (p: GraphPeriod) => void }) {
   const apply = () => {
     if (mode === "last") {
       const k = Math.floor(Number(n));
-      if (!(k > 0)) return setError("Enter a number above 0.");
+      if (!(k > 0)) return setError("Enter a number greater than 0.");
       setError(null);
       return onPick(unit === "hours" ? { hours: k } : { days: k });
     }
@@ -94,17 +95,17 @@ function CustomPeriod({ onPick }: { onPick: (p: GraphPeriod) => void }) {
     const start = new Date(mode === "dates" ? `${from.slice(0, 10)}T00:00` : from).getTime();
     let end = new Date(mode === "dates" ? `${to.slice(0, 10)}T00:00` : to).getTime();
     if (mode === "dates") end = new Date(new Date(end).setDate(new Date(end).getDate() + 1)).getTime();
-    if (!Number.isFinite(start) || !Number.isFinite(end)) return setError("Enter both ends of the period.");
-    if (end <= start) return setError("The end has to be after the start.");
+    if (!Number.isFinite(start) || !Number.isFinite(end)) return setError("Enter a start and an end.");
+    if (end <= start) return setError("The end must be after the start.");
     setError(null);
     onPick({ from: start, to: end });
   };
   return (
     <form className="custom-period" onSubmit={(e) => { e.preventDefault(); apply(); }}>
       <select value={mode} onChange={(e) => setMode(e.target.value as typeof mode)} aria-label="Kind of period">
-        <option value="last">The last…</option>
-        <option value="dates">From one date to another</option>
-        <option value="times">From one time to another</option>
+        <option value="last">Last…</option>
+        <option value="dates">Date range</option>
+        <option value="times">Time range</option>
       </select>
       {mode === "last" ? (
         <>
@@ -119,7 +120,7 @@ function CustomPeriod({ onPick }: { onPick: (p: GraphPeriod) => void }) {
         <>
           <label>From <input type={mode === "dates" ? "date" : "datetime-local"} value={mode === "dates" ? from.slice(0, 10) : from}
             onChange={(e) => setFrom(mode === "dates" ? `${e.target.value}T00:00` : e.target.value)} /></label>
-          <label>to <input type={mode === "dates" ? "date" : "datetime-local"} value={mode === "dates" ? to.slice(0, 10) : to}
+          <label>To <input type={mode === "dates" ? "date" : "datetime-local"} value={mode === "dates" ? to.slice(0, 10) : to}
             onChange={(e) => setTo(mode === "dates" ? `${e.target.value}T00:00` : e.target.value)} /></label>
         </>
       )}
@@ -140,7 +141,7 @@ export function Graphs({ onError }: { onError: (e: unknown) => void }) {
     <>
       <div className="page-head">
         <h1>Statistics</h1>
-        <p className="muted">Trends across the recorded history. Days and hours are in your local time ({zoneLabel()}), and a session counts on the day it started.</p>
+        <p className="muted">Usage over the selected period. Times are shown in your local time zone ({zoneLabel()}); sessions are counted on the day they started.</p>
       </div>
       <div className="period" role="group" aria-label="Period">
         {PERIODS.map((p) => (
@@ -155,10 +156,10 @@ export function Graphs({ onError }: { onError: (e: unknown) => void }) {
           {/* Whole days, as "21 September to 1 October" was asked: the end day by its date. */}
           {wholeDays(data.from, data.to) ? dateTime(data.from).slice(0, 10) : dateTime(data.from)} to {data.to > Date.now() ? "now"
             : wholeDays(data.from, data.to) ? `the end of ${dateTime(data.to - 1).slice(0, 10)}` : dateTime(data.to)}
-          {data.bucket === "hour" ? " · by the hour" : ""}
+          {data.bucket === "hour" ? " · Hourly" : ""}
         </p>
       )}
-      {!data ? <p className="empty">{busy ? "Loading…" : "Couldn't read the history."}</p> : (
+      {!data ? <p className="empty">{busy ? "Loading…" : "The history could not be loaded."}</p> : (
         <div className={busy ? "stale" : ""}>
           <GraphsBody g={data} />
         </div>
@@ -183,22 +184,22 @@ function Upload({ g, rows, per, label }: { g: GraphData; rows: Bucket[]; per: st
       <div className="panel-head">
         <h3>Server upload</h3>
         <span className="muted small">
-          {u.since === null ? "Measured from this version on: nothing yet."
-            : `Everything the bot's port sent (video, playlists, subtitles, the page), measured since ${dateTime(u.since)}.`}
+          {u.since === null ? "No upload data has been recorded yet."
+            : `All data sent by the server, including video, playlists, subtitles and the Activity page, since ${dateTime(u.since)}.`}
         </span>
       </div>
       <div className="tiles">
         <Tile label="Sent by the server" value={bytes(u.sentBytes)} sub={`${count(u.allMinutes)} minutes with traffic`} />
         <Tile label="Average while playing" value={mbps(u.avgKbps)} sub={`${mibs(u.avgKbps)} · over ${count(u.minutes)} minutes`} />
-        <Tile label="95th percentile" value={mbps(u.p95Kbps)} sub={`${mibs(u.p95Kbps)} · 95% of minutes were at or under this`} />
+        <Tile label="95th percentile" value={mbps(u.p95Kbps)} sub={`${mibs(u.p95Kbps)} · 95% of minutes at or below this rate`} />
         <Tile label="Busiest minute" value={mbps(u.peakKbps)} sub={`${mibs(u.peakKbps)}${u.peakAt ? ` · ${dateTime(u.peakAt)}` : ""}`} />
       </div>
-      <h4>By how many were watching</h4>
+      <h4>By number of viewers</h4>
       <div className="table-wrap">
         <table className="table">
           <thead>
             <tr><th>Viewers</th><th className="num">Minutes</th><th className="num">Average</th><th className="num">95th pct.</th>
-              <th className="num">Busiest</th><th className="num" title="What the server sent over the bitrate of the one stream playing, over whole minutes of it">Sent ÷ bitrate</th></tr>
+              <th className="num">Busiest</th><th className="num">Relative to bitrate</th></tr>
           </thead>
           <tbody>
             {u.byViewers.map((r) => (
@@ -214,18 +215,12 @@ function Upload({ g, rows, per, label }: { g: GraphData; rows: Bucket[]; per: st
           </tbody>
         </table>
       </div>
-      <p className="note">
-        For the qBittorrent manager: <span className="mono">MAX_UPLOAD_MIB</span> and <span className="mono">MIN_UPLOAD_MIB</span> are in MiB/s.
-        It reserves a stream's bitrate once for one viewer and, for more, that bitrate
-        × <span className="mono">THEATER_SHARED_BASE</span> × (1 + <span className="mono">THEATER_EXTRA_VIEWER_FACTOR</span> × (viewers − 1)).
-        The last column is what that came to here: what the server sent over the bitrate of the one stream playing, on average.
-      </p>
       <div className="charts">
         <ChartCard title={`Sent by the server ${per}`} series={sent}
           table={<SeriesTable rows={sentRows} label={label} labelKey="label" series={sent} fmt={inUnit} />}>
           <Columns rows={sentRows} x="label" series={sent} fmt={inUnit} axisFmt={(n) => `${count(n)} ${unit.label}`} decimals tipTitle={tipTitle} />
         </ChartCard>
-        <ChartCard title={`Busiest minute ${per}`} sub="The server's upload in its busiest minute" series={peak}
+        <ChartCard title={`Busiest minute ${per}`} sub="Peak one-minute upload rate" series={peak}
           table={<SeriesTable rows={sentRows} label={label} labelKey="label" series={peak} fmt={(n) => mbps(n * 1000)} />}>
           <Columns rows={sentRows} x="label" series={peak} fmt={(n) => mbps(n * 1000)} axisFmt={(n) => `${count(n)} Mbps`} decimals tipTitle={tipTitle} />
         </ChartCard>
@@ -268,6 +263,8 @@ function GraphsBody({ g }: { g: GraphData }) {
   const weekRows = [1, 2, 3, 4, 5, 6, 0].map((w) => ({ ...g.weekdays[w], label: WEEKDAYS[w].slice(0, 3), title: WEEKDAYS[w] }));
   const titleRows = g.titles.map((x) => ({ ...x, name: x.title ?? `Plex item ${x.ratingKey}` }));
   const peopleRows = g.people.map((x) => ({ ...x, name: x.username ?? x.userId }));
+  const sharerRows = (g.sharers ?? []).map((x) => ({ ...x, name: x.username ?? x.userId }));
+  const pairRows = (g.pairs ?? []).map((x) => ({ ...x, name: `${x.fromName ?? x.from} → ${x.toName ?? x.to}` }));
   const serverRows = g.servers.map((x) => ({ ...x, name: names.guild(x.guildId) ?? x.guildId ?? "Direct message" }));
   const rowLabel = by === "hour" ? "Hour" : by === "day" ? "Day" : by === "week" ? "Week of" : "Month";
   const table = (series: Series[], fmt: (n: number) => string, r: Array<Record<string, unknown>> = chartRows, label = rowLabel) =>
@@ -280,7 +277,7 @@ function GraphsBody({ g }: { g: GraphData }) {
         <Tile label="Watch time" value={hours(t.watchedS)} sub="Combined across all viewers" />
         <Tile label="Users" value={count(t.people)} sub={`${count(t.launches)} launches · ${count(t.requests)} requests`} />
         <Tile label="Data delivered" value={bytes(t.httpBytes + t.p2pBytes)}
-          sub={`${share(t.hitShare)} of HTTP data served by Discord's cache`} />
+          sub={`${share(t.hitShare)} of HTTP traffic served by Discord's cache`} />
         <Tile label="Transcoded streams" value={t.streams ? share(t.reencodes / t.streams) : "—"}
           sub={`${count(t.reencodes)} of ${count(t.streams)} streams`} />
         <Tile label="Buffering" value={`${count(t.stalls)} ${t.stalls === 1 ? "event" : "events"}`}
@@ -302,7 +299,7 @@ function GraphsBody({ g }: { g: GraphData }) {
           <Columns rows={chartRows} x="label" series={one("watchedH", "Hours watched")} fmt={(n) => hours(n * 3600)}
             axisFmt={(n) => `${count(n)} h`} decimals tipTitle={tipTitle} />
         </ChartCard>
-        <ChartCard title={`Data delivered ${per}, by source`} sub="As reported by the players" series={data}
+        <ChartCard title={`Data delivered ${per}, by source`} series={data}
           table={table(data, inUnit)} wide>
           <Columns rows={chartRows} x="label" series={data} fmt={inUnit} axisFmt={unitAxis} decimals stacked tipTitle={tipTitle} height={240} />
         </ChartCard>
@@ -314,7 +311,7 @@ function GraphsBody({ g }: { g: GraphData }) {
           {g.reasons.length === 0 ? <p className="muted">No stream was transcoded in this period.</p>
             : <Bars rows={g.reasons} nameKey="reason" valueKey="streams" label="Streams" fmt={count} />}
         </ChartCard>
-        <ChartCard title={`Buffering ${per}`} sub="Times a viewer's playback stopped to wait for data" series={one("stalls", "Events")}
+        <ChartCard title={`Buffering ${per}`} sub="Playback interruptions while waiting for data" series={one("stalls", "Events")}
           table={table([{ key: "stalls", label: "Events", color: COLORS[0] }], count)}>
           <Columns rows={chartRows} x="label" series={one("stalls", "Events")} fmt={count} tipTitle={tipTitle} />
         </ChartCard>
@@ -331,18 +328,29 @@ function GraphsBody({ g }: { g: GraphData }) {
         </ChartCard>
         <ChartCard title="Most watched titles" sub="By combined watch time" series={one("watchedS", "Watch time")}
           table={<TopTable rows={titleRows} cols={[["Sessions", "plays", count], ["Users", "people", count], ["Watch time", "watchedS", hours]]} />}>
-          {titleRows.length === 0 ? <p className="muted">No data yet.</p>
+          {titleRows.length === 0 ? <p className="muted">No data for this period.</p>
             : <Bars rows={titleRows} nameKey="name" valueKey="watchedS" label="Watch time" fmt={hours} />}
         </ChartCard>
-        <ChartCard title="Most active users" sub="By watch time. Select a user to open their page." series={one("watchedS", "Watch time")}
-          table={<TopTable rows={peopleRows} cols={[["Sessions", "plays", count], ["Watch time", "watchedS", hours], ["Data received", "bytes", bytes]]} />}>
-          {peopleRows.length === 0 ? <p className="muted">No data yet.</p>
+        <ChartCard title="Most active users" sub="By watch time" series={one("watchedS", "Watch time")}
+          table={<TopTable rows={peopleRows} cols={[["Sessions", "plays", count], ["Watch time", "watchedS", hours], ["Data received", "bytes", bytes],
+            ["Sent to viewers", "upBytes", bytes]]} />}>
+          {peopleRows.length === 0 ? <p className="muted">No data for this period.</p>
             : <Bars rows={peopleRows} nameKey="name" valueKey="watchedS" label="Watch time" fmt={hours}
               onPick={(r) => { location.hash = `people/${String(r.userId)}`; }} />}
         </ChartCard>
+        <ChartCard title="Top peer-to-peer sharers" sub="By data sent to other viewers" series={[{ key: "upBytes", label: "Sent to viewers", color: COLORS[2] }]}
+          table={<TopTable rows={sharerRows} cols={[["Sessions", "plays", count], ["Sent to viewers", "upBytes", bytes], ["Received from viewers", "p2pBytes", bytes]]} />}>
+          {sharerRows.length === 0 ? <p className="muted">No data was shared between viewers in this period.</p>
+            : <Bars rows={sharerRows} nameKey="name" valueKey="upBytes" label="Sent to viewers" fmt={bytes} color={COLORS[2]}
+              onPick={(r) => { location.hash = `people/${String(r.userId)}`; }} />}
+        </ChartCard>
+        <ChartCard title="Peer-to-peer transfers" sub="Data sent from one viewer to another" series={one("bytes", "Sent")}
+          table={<TopTable rows={pairRows} cols={[["Sent", "bytes", bytes]]} />}>
+          <ShareList shares={g.pairs ?? []} empty="No data was shared between viewers in this period." />
+        </ChartCard>
         <ChartCard title="Most active servers" sub="Discord servers by combined watch time" series={one("watchedS", "Watch time")}
           table={<TopTable rows={serverRows} cols={[["Sessions", "plays", count], ["Users", "people", count], ["Watch time", "watchedS", hours]]} />}>
-          {serverRows.length === 0 ? <p className="muted">No data yet.</p>
+          {serverRows.length === 0 ? <p className="muted">No data for this period.</p>
             : <Bars rows={serverRows} nameKey="name" valueKey="watchedS" label="Watch time" fmt={hours}
               onPick={() => { location.hash = "places"; }} />}
         </ChartCard>
@@ -399,7 +407,7 @@ export function MiniChart({ kind, onError }: { kind: "plays" | "people" | "data"
     return (
       <ChartCard title="Most active users" sub={more} series={[{ key: "watchedS", label: "Watch time", color: COLORS[0] }]}
         table={<TopTable rows={top} cols={[["Sessions", "plays", count], ["Watch time", "watchedS", hours], ["Data received", "bytes", bytes]]} />}>
-        {top.length === 0 ? <p className="muted">No watch time recorded.</p>
+        {top.length === 0 ? <p className="muted">No watch time has been recorded.</p>
           : <Bars rows={top} nameKey="name" valueKey="watchedS" label="Watch time" fmt={hours}
             onPick={(r) => { location.hash = `people/${String(r.userId)}`; }} />}
       </ChartCard>

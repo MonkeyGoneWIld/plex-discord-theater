@@ -37,7 +37,7 @@ function said(r: TitleRequest) {
   if (r.outcome === "requested" || r.outcome === "already requested") {
     const then = r.status !== null && r.outcome === "requested" ? MEDIA_STATUS[r.status] ?? `Status ${r.status}` : null;
     if (now) return <span className={`badge ${now[1]}`} title={then ? `When requested: ${then}` : undefined}>{now[0]}</span>;
-    return then ? <span className="muted" title="Seerr could not be reached for the current status">{then} (when requested)</span> : "—";
+    return then ? <span className="muted" title="Current status unavailable: Seerr could not be reached">{then} (when requested)</span> : "—";
   }
   return (
     <>
@@ -96,7 +96,7 @@ export function Requests({ onError }: { onError: (e: unknown) => void }) {
     <>
       <div className="page-head">
         <h1>Requests</h1>
-        <p className="muted">Every title requested through Seerr from the Activity, newest first.</p>
+        <p className="muted">All titles requested through Seerr from the Activity, newest first.</p>
       </div>
     <section className="card">
       <form className="toolbar" onSubmit={(e) => { e.preventDefault(); setQuery(q); setPages([undefined]); }}>

@@ -22,7 +22,7 @@ const TITLES: Array<[string, string, number]> = [
 ];
 const GUILDS: Array<[string, string]> = [["999000111", "888000111"], ["777000222", "666000222"], ["555000333", "444000333"]];
 const REASONS = [
-  "10-bit picture: frames dropped on this player", "Their player can't play HEVC",
+  "10-bit picture: frames dropped on this player", "HEVC: not decoded by this player",
   "Over the room's bandwidth: 20 Mbps", "Subtitles burned in: PGS", "10-bit picture: frames dropped on this player",
 ];
 const ASKED: Array<[string, number, string]> = [
@@ -33,6 +33,8 @@ const ASKED: Array<[string, number, string]> = [
 /** Writes the history into `dbPath`, ending before `now`. */
 export async function backfill(dbPath: string, now: number, days = 45): Promise<void> {
   const { Recorder } = await import("../src/admin/recorder.js");
+  /** A player's key, as its peer id carries it. */
+  const keyOf = (id: string) => `K${id.slice(0, 1)}${id.slice(-6)}`;
   let seed = 7;
   const rnd = () => (seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648) / 2_147_483_648;
   const pick = <T>(a: T[]) => a[Math.floor(rnd() * a.length)];
@@ -85,7 +87,7 @@ export async function backfill(dbPath: string, now: number, days = 45): Promise<
       rec.tick(g);
       const start = g;
       people.forEach(([userId], i) => rec.clientLog({ at: g, userId, clientId: `past-${n}-${i}`, entries: [
-        { t: g, level: "LOG", tag: "Health", msg: "sample", data: { session: "past", httpMB: 0, p2pMB: 0, edgeHitMB: "0", edgeMB: "0" } },
+        { t: g, level: "LOG", tag: "Health", msg: "sample", data: { session: "past", httpMB: 0, p2pMB: 0, edgeHitMB: "0", edgeMB: "0", peerKey: keyOf(userId) } },
       ] }));
       const length = Math.round(minutes * (0.4 + rnd() * 0.6)) * 60_000;
       while (g - start < length) {
@@ -93,11 +95,22 @@ export async function backfill(dbPath: string, now: number, days = 45): Promise<
         room.positionS = (g - start) / 1000;
         rec.tick(g);
       }
+      // What each had from the others, and who sent it: the one before them, or the host.
+      const had = people.map((_, i) => ((g - start) / 1000) * (reencode ? 0.5 : 1.1) * (0.8 + rnd() * 0.4));
+      const got = had.map((mb, i) => (i > 0 && rnd() < 0.4 ? mb * 0.2 : 0));
+      const sent = people.map(() => ({} as Record<string, number>));
+      got.forEach((mb, i) => {
+        if (mb <= 0) return;
+        const from = rnd() < 0.6 ? 0 : i - 1;
+        sent[from][keyOf(people[i][0])] = (sent[from][keyOf(people[i][0])] ?? 0) + mb;
+      });
       people.forEach(([userId], i) => {
-        const mb = ((g - start) / 1000) * (reencode ? 0.5 : 1.1) * (0.8 + rnd() * 0.4);
+        const mb = had[i];
         const hit = 0.25 + rnd() * 0.5;
+        const upMB = Object.values(sent[i]).reduce((a, b) => a + b, 0);
         const entries: Any[] = [{ t: g, level: "LOG", tag: "Health", msg: "sample", data: {
-          session: "past", httpMB: mb, p2pMB: i > 0 && rnd() < 0.4 ? mb * 0.2 : 0, edgeHitMB: (mb * hit).toFixed(1), edgeMB: (mb * 0.9).toFixed(1),
+          session: "past", httpMB: mb, p2pMB: got[i], edgeHitMB: (mb * hit).toFixed(1), edgeMB: (mb * 0.9).toFixed(1),
+          peerKey: keyOf(userId), ...(upMB > 0 ? { upMB, upTo: sent[i] } : {}),
         } }];
         if (rnd() < 0.25) {
           const at = start + Math.floor(rnd() * (g - start - 60_000)) + 30_000;

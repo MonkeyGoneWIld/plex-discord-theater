@@ -94,7 +94,9 @@ Updated every 2 seconds. The browser tab shows how many sessions are active.
   from the server, from Discord's cache and from other viewers, against the
   bitrate they need (the dashed line). Players report every 10 seconds, so
   each point is a 30-second average.
-- **Where the data came from.** The session's total, split the same way.
+- **Data sources for this session.** The session's total, split the same way.
+- **Peer-to-peer sharing for this session.** Who sent video to whom, and how
+  much, largest first.
 
 **Each stream** reads at a glance:
 
@@ -109,8 +111,8 @@ identifiers. Audio and subtitle tracks show by name, with Plex's number beside.
 **Each viewer** shows their role and their player's state, from what it last
 reported: watching, loading (as they start, or after a seek), buffering and
 for how long, away or disconnected. Then which stream they are on, how long
-they have watched, the data they received with its split, and their
-buffering. Loading is not buffering and isn't counted as it. Select a viewer
+they have watched, the data they received with its split, what they sent to
+other viewers, and their buffering. Loading is not buffering and isn't counted as it. Select a viewer
 for their Discord user ID, quality limit, subtitle track by name, and what
 their device can play.
 
@@ -124,7 +126,7 @@ name, while either is true.
 Every session, newest first, each with its poster: the title, when it started,
 the host, the Discord server and channel, who watched, how long it played,
 whether its streams were direct or transcoded, the data delivered with its
-split, and whether playback was smooth.
+split, and how often it buffered.
 
 Search finds a title, a viewer's name or Discord user ID, or a server or
 channel ID. **CSV** and **JSON** export every session the search finds.
@@ -135,13 +137,13 @@ Select a session to open it:
 
 | Section | Shows |
 |---|---|
-| Summary | How it ended, time played, viewers, streams, data delivered and buffering, then where the data came from |
-| Viewers | Each person's role, watch time, data received and buffering |
+| Summary | How it ended and who ended it, time played, viewers, streams, data delivered and buffering, then the data sources and peer-to-peer sharing |
+| Viewers | Each person's role, watch time, data received, data sent to other viewers, and buffering |
 | Streams | Each stream, as on Now Playing |
 | Session overview | A chart of the session over time: one row for playback (playing, paused, waiting for the host), one for where in the title it was, one for each stream and one for each viewer, with marks where something changed. Buffering and player errors sit on the position line where they happened, so a bad part of a file shows. Hover any bar, line or mark for details. |
-| What was watched | One bar per viewer across the whole title, and one for anyone: the parts they saw, with buffering (a red bar) and player errors (a red diamond) where they happened in the title. |
-| Key moments | The events that explain the session, newest first, each with its reason: a stream starting and why, the host changing a track and who moved with them, a viewer changing stream, quality or subtitles, long buffering, and errors. This is where to look when a second stream started part way through. |
-| All events | Every event, newest first, with filters for playback, viewers, streams and tracks, and loading, buffering and errors. Someone joining starts on a stream; they don't switch to it. Select an event for its details. |
+| Viewing coverage | One bar per viewer across the whole title, and one for all viewers: the parts they saw, with buffering (a red bar) and player errors (a red diamond) where they happened in the title. |
+| Key moments | The events that explain the session, newest first, each with its reason: a stream starting and why, the host changing a track and who moved with them, a viewer changing stream, quality or subtitles, Skip Intro and Skip Credits, a stream ending early, long buffering, and errors. This is where to look when a second stream started part way through. |
+| All events | Every event, newest first, with filters for playback, viewers, streams and tracks, and loading, buffering and errors. Each event names who did it and how: a seek says whether it came from Skip Intro, Skip Credits, the jump controls or the timeline, and a session's end says whether the title finished, the host closed the player, started the next episode or started a different title. Select an event for its details. |
 
 Loading the start of a stream, or after a seek, is shown as loading, not
 buffering. History recorded by earlier versions is corrected the first time
@@ -150,9 +152,8 @@ the server starts on it.
 ## Statistics
 
 Trends over the last 24 hours, 7 days, 30 days, 90 days, a year, all time, or
-a period of your own under **Custom…**: the last so many hours or days, from
-one date to another (21 September to 1 October, both whole days), or from one
-time to another. Three days or less is shown by the hour. Days and hours are
+a period of your own under **Custom…**: the last so many hours or days, a
+date range (21 September to 1 October, both whole days), or a time range. Three days or less is shown by the hour. Days and hours are
 in your local time, and a session counts on the day it started.
 
 - Sessions, watch time, users, data delivered, the share of streams
@@ -163,6 +164,8 @@ in your local time, and a session counts on the day it started.
 - Sessions by hour of the day and by weekday.
 - The most watched titles, the most active users, and the most active Discord
   servers.
+- The top peer-to-peer sharers, by data sent to other viewers, and the
+  largest transfers between two viewers.
 
 **Server upload** is everything the server's port sent in the period: video,
 playlists, subtitles and the page, measured as it leaves. The page says since
@@ -170,9 +173,10 @@ when.
 
 - In total, on average while something played, at the 95th percentile, and
   in its busiest minute, in Mbps and MiB/s.
-- The same by how many were watching, with **Sent ÷ bitrate**: what the
+- The same by number of viewers, with **Relative to bitrate**: what the
   server sent over the bitrate of the one stream playing. Use it to set the
-  qBittorrent manager; see
+  qBittorrent manager's `MAX_UPLOAD_MIB`, `MIN_UPLOAD_MIB`,
+  `THEATER_SHARED_BASE` and `THEATER_EXTRA_VIEWER_FACTOR`; see
   [qBittorrent Manager API](qBittorrent-Manager-API#setting-it-from-your-own-figures).
 - What was sent, and the busiest minute, per hour or day.
 
@@ -181,10 +185,11 @@ when.
 ## Users
 
 Everyone who has used the Activity, most recently active first: their Discord
-user ID, sessions, sessions hosted, launches, watch time, data received,
-buffering, requests, and the last title they watched. Select a user for the
-servers and channels they used, every session they were in, and every title
-they requested.
+user ID, sessions, sessions hosted, launches, watch time, data received, data
+sent to other viewers, buffering, requests, and the last title they watched.
+Select a user for who they sent video to and received it from, the servers and
+channels they used, every session they were in, and every title they
+requested.
 
 ## Discord Servers
 

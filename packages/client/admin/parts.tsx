@@ -10,7 +10,7 @@ import { SplitBar } from "./viz";
 export const NOTE_LABELS: Record<string, string> = {
   engine: "Engine",
   encoder: "Encoder",
-  fallback: "Handled by Plex because",
+  fallback: "Plex fallback reason",
   video: "Video",
   reason: "Transcode reason",
   kbps: "Video bitrate (kbps)",
@@ -34,7 +34,7 @@ export function NotesList({ notes }: { notes: Notes }) {
       <dl className="grid">
         {Object.entries(notes).map(([k, v]) => (
           <span key={k} style={{ display: "contents" }}>
-            <dt title={`com.pdt.${k}`}>{NOTE_LABELS[k] ?? k}</dt>
+            <dt>{NOTE_LABELS[k] ?? k}</dt>
             <dd>{String(v)}</dd>
           </span>
         ))}
@@ -140,7 +140,7 @@ export function PlaceName({ kind, id }: { kind: "guild" | "channel"; id: string 
   const what = kind === "guild" ? "Discord server" : "Discord channel";
   return name
     ? <span className="place-name" title={`${what} ID ${id}`}>{name}</span>
-    : <span className="mono" title={`${what} ID ${id}: its name is learned when somebody opens the Activity there`}>{short(id, 10)}</span>;
+    : <span className="mono" title={`${what} ID ${id}`}>{short(id, 10)}</span>;
 }
 
 /** Where a session or a launch was: "Movie Night · Film Club", by name where known. */

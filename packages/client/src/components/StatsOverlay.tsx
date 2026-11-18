@@ -26,6 +26,8 @@ export interface P2PStats {
   p2pBytes: number;
   httpBytes: number;
   uploadBytes: number;
+  /** Of uploadBytes, what went to each other player, by the key in its peer id (lib/peerSpeeds). */
+  uploadTo: Map<string, number>;
   peers: Set<string>;
 }
 

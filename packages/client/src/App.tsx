@@ -24,6 +24,7 @@ import { useMediaQuery, MOBILE_LANDSCAPE_QUERY, NARROW_QUERY, PHONE_QUERY } from
 import type { PlexItem } from "./lib/api";
 import type { QueueItem, SuggestionItem } from "./hooks/useSync";
 import { HEADER_PILL, QUIET_SURFACE } from "./lib/surface";
+import { notePlayCause } from "./lib/commandCause";
 
 /**
  * The player, and everything only it needs, in a separate chunk.
@@ -660,6 +661,7 @@ export function App() {
   ) => {
     hostPlayerClosingRef.current = false;
     setMinimizedPlayer(null);
+    notePlayCause("picked", item.ratingKey);
     pushView({
       kind: "player", item, subtitles, resumePosition, mediaIndex,
       audioStreamId, subtitleStreamId,

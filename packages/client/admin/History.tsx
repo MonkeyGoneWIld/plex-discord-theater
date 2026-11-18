@@ -8,26 +8,38 @@ import {
 } from "./parts";
 import { StreamCard } from "./streams";
 import { KeyMoments, SessionChart, Watched } from "./timeline";
-import { newestFirst, type EventContext } from "./events";
+import { eventDetails, newestFirst, type EventContext } from "./events";
 import { MiniChart } from "./lazy";
 import { Icon } from "./icons";
 import { Poster, titleLine, useTitles } from "./titles";
-import { Avatar, pct, SplitBar } from "./viz";
+import { Avatar, pct, ShareList, SplitBar } from "./viz";
 
 const PAGE = 50;
 
+type Ending = { endedAt: number | null; endReason: string | null; endBy: string | null; endCause?: string | null };
+
 /** How a session ended, in a few words. */
-function endText(p: { endedAt: number | null; endReason: string | null; endBy: string | null }): string {
+function endText(p: Ending): string {
   if (p.endedAt === null) return "In progress";
-  return p.endReason === "stopped" ? `Stopped${p.endBy ? ` by ${p.endBy}` : ""}`
-    : p.endReason === "another title" ? "Next title started"
-      : p.endReason === "room closed" ? "Everyone left"
-        : p.endReason === "server stopped" ? "Server shut down"
-          : p.endReason === "server restarted" ? "Server restarted unexpectedly"
-            : p.endReason ?? "Ended";
+  const by = p.endBy ? ` by ${p.endBy}` : "";
+  if (p.endReason === "stopped") {
+    return p.endCause === "finished" ? "Finished" : p.endCause === "closed" ? `Player closed${by}` : `Stopped${by}`;
+  }
+  if (p.endReason === "another title") {
+    return p.endCause === "next episode" ? `Next episode started${by}`
+      : p.endCause === "previous episode" ? `Previous episode started${by}`
+        : p.endCause === "co-host" ? "Co-host's request started"
+          : p.endCause === "queue" ? `Queued title started${by}`
+            : p.endCause === "up next" || p.endCause === "end screen" ? `Next title started${by}`
+              : `Another title started${by}`;
+  }
+  return p.endReason === "room closed" ? "All viewers left"
+    : p.endReason === "server stopped" ? "Server shut down"
+      : p.endReason === "server restarted" ? "Server restarted unexpectedly"
+        : p.endReason ?? "Ended";
 }
 
-function EndBadge({ p }: { p: { endedAt: number | null; endReason: string | null; endBy: string | null } }) {
+function EndBadge({ p }: { p: Ending }) {
   return p.endedAt === null
     ? <span className="badge good"><span className="dot good" />In progress</span>
     : <span className="badge muted">{endText(p)}</span>;
@@ -52,13 +64,13 @@ function PlayList({ onError }: { onError: (e: unknown) => void }) {
     <>
       <div className="page-head">
         <h1>History</h1>
-        <p className="muted">Every playback session, newest first. Select one for its viewers, streams and full timeline.</p>
+        <p className="muted">All playback sessions, newest first. Select a session to view its viewers, streams and timeline.</p>
       </div>
       <MiniChart kind="plays" onError={onError} />
       <section className="card">
         <form className="toolbar" onSubmit={(e) => { e.preventDefault(); setQuery(q); setPages([undefined]); }}>
           <label className="grow">
-            <span>Search by title, viewer name, Discord user ID, or server or channel ID</span>
+            <span>Search by title, viewer, Discord user ID, server or channel</span>
             <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search sessions" />
           </label>
           <button type="submit">Search</button>
@@ -90,7 +102,7 @@ function PlayRow({ p, sub }: { p: PlaySummary; sub: string | null }) {
         <span className="play-main">
           <span className="play-title">{p.title ?? `Plex item ${p.ratingKey}`}</span>
           <span className="play-sub">
-            {sub ? `${sub} · ` : ""}{dateTime(p.startedAt)} · hosted by {p.hostName ?? p.hostUserId ?? "unknown"}
+            {sub ? `${sub} · ` : ""}{dateTime(p.startedAt)} · Host: {p.hostName ?? p.hostUserId ?? "unknown"}
           </span>
           <span className="play-sub"><Where guildId={p.guildId} channelId={p.channelId} /></span>
         </span>
@@ -103,7 +115,7 @@ function PlayRow({ p, sub }: { p: PlaySummary; sub: string | null }) {
         </span>
         <span className="play-col">
           <strong>{clock(p.playedS)}</strong>
-          <span className="play-label">played</span>
+          <span className="play-label">Played</span>
         </span>
         <span className="play-col">
           {p.streams === 0 ? <span className="badge muted">No stream</span>
@@ -116,7 +128,7 @@ function PlayRow({ p, sub }: { p: PlaySummary; sub: string | null }) {
           <SplitBar server={p.botBytes} cache={p.cacheBytes} peers={p.p2pBytes} legend={false} />
         </span>
         <span className="play-col">
-          <span className={`health ${stallTone}`}><span className={`dot ${stallTone}`} />{p.stalls === 0 ? "Smooth" : `${p.stalls} buffering`}</span>
+          <span className={`health ${stallTone}`}><span className={`dot ${stallTone}`} />{p.stalls === 0 ? "No buffering" : `Buffered ${p.stalls} ${p.stalls === 1 ? "time" : "times"}`}</span>
           <span className="play-label">{endText(p)}</span>
         </span>
         <span className="chev"><Icon name="chevron" size={16} /></span>
@@ -161,7 +173,7 @@ function PlayPage({ id, onError }: { id: number; onError: (e: unknown) => void }
               <span className="fact"><Icon name="clock" size={14} />{dateTime(play.startedAt)}{play.endedAt ? ` → ${timeOfDay(play.endedAt)}` : ""}</span>
               <span className="fact"><Icon name="places" size={14} />Server <strong><PlaceName kind="guild" id={play.guildId} /></strong></span>
               <span className="fact">Channel <strong><PlaceName kind="channel" id={play.channelId} /></strong></span>
-              <span className="fact" title={`The Activity's room in Discord: instance ${play.roomId}`}>Room <span className="mono">{short(play.roomId, 14)}</span></span>
+              <span className="fact">Room <span className="mono">{short(play.roomId, 14)}</span></span>
               <span className="fact">Plex item <span className="mono">{play.ratingKey}</span></span>
               {play.endedAt === null && <button className="link" onClick={reload}>Refresh</button>}
             </div>
@@ -169,29 +181,36 @@ function PlayPage({ id, onError }: { id: number; onError: (e: unknown) => void }
               <div className="kpi"><span className="kpi-label">Time played</span><span className="kpi-value">{clock(play.playedS)}</span>
                 <span className="kpi-sub">{clock(play.startPosS ?? 0)} → {clock(play.lastPosS ?? 0)}{i?.durationS ? ` of ${clock(i.durationS)}` : ""}</span></div>
               <div className="kpi"><span className="kpi-label">Viewers</span><span className="kpi-value">{viewers.length}</span>
-                <span className="kpi-sub">up to {play.peakViewers} at once</span></div>
+                <span className="kpi-sub">Peak of {play.peakViewers} at once</span></div>
               <div className="kpi"><span className="kpi-label">Streams</span><span className="kpi-value">{streams.length}</span>
-                <span className="kpi-sub">{transcoded ? `${transcoded} transcoded` : "all direct"}</span></div>
+                <span className="kpi-sub">{transcoded ? `${transcoded} transcoded` : "All direct"}</span></div>
               <div className="kpi"><span className="kpi-label">Data delivered</span><span className="kpi-value">{bytes(server + cache + peers)}</span>
-                <span className="kpi-sub">{pct(cache + peers, server + cache + peers)}% not from the server</span></div>
+                <span className="kpi-sub">{pct(cache + peers, server + cache + peers)}% offloaded from the server</span></div>
               <div className={`kpi ${health}`}><span className="kpi-label">Buffering</span>
                 <span className="kpi-value">{stalls === 0 ? "None" : `${stalls} ${stalls === 1 ? "event" : "events"}`}</span>
-                <span className="kpi-sub">{stalls ? `${clock(stalledMs / 1000)} in total` : "playback was smooth"}{errors ? ` · ${errors} errors` : ""}</span></div>
+                <span className="kpi-sub">{stalls ? `${clock(stalledMs / 1000)} in total` : "No interruptions"}{errors ? ` · ${errors} errors` : ""}</span></div>
             </div>
           </div>
         </div>
 
         <div className="session-block">
-          <h4>Where the data came from</h4>
+          <h4>Data sources</h4>
           <SplitBar server={server} cache={cache} peers={peers} />
         </div>
+
+        {(data.shares?.length ?? 0) > 0 && (
+          <div className="session-block">
+            <h4>Peer-to-peer sharing</h4>
+            <ShareList shares={data.shares ?? []} nameOf={(id) => nameOf(id) ?? id} />
+          </div>
+        )}
 
         <div className="session-block">
           <h4>Viewers ({viewers.length})</h4>
           <div className="table-wrap">
             <table className="table viewers">
               <thead>
-                <tr><th>Viewer</th><th>Watched</th><th>Data received</th><th>Buffering</th><th>First seen</th><th>Last seen</th><th>Discord user ID</th></tr>
+                <tr><th>Viewer</th><th>Watched</th><th>Data received</th><th className="num">Sent to viewers</th><th>Buffering</th><th>First seen</th><th>Last seen</th><th>Discord user ID</th></tr>
               </thead>
               <tbody>
                 {viewers.map((v) => (
@@ -207,6 +226,7 @@ function PlayPage({ id, onError }: { id: number; onError: (e: unknown) => void }
                     </td>
                     <td className="nowrap">{clock(v.watchedS)}</td>
                     <td><DataCell d={v} /></td>
+                    <td className="num">{v.upBytes > 0 ? bytes(v.upBytes) : "—"}</td>
                     <td><BufferingCell d={v} /></td>
                     <td className="nowrap">{timeOfDay(v.firstSeen)}</td>
                     <td className="nowrap">{timeOfDay(v.lastSeen)}</td>
@@ -235,15 +255,15 @@ function PlayPage({ id, onError }: { id: number; onError: (e: unknown) => void }
       <section className="card">
         <div className="panel-head">
           <h3>Session overview</h3>
-          <span className="muted small">Playback, where in the title it was, each stream and each viewer over time. Hover any bar, line or mark for details.</span>
+          <span className="muted small">Playback position, streams and viewers over time.</span>
         </div>
         <SessionChart data={data} durationS={i?.durationS ?? null} ctx={ctx} />
       </section>
 
       <section className="card">
         <div className="panel-head">
-          <h3>What was watched</h3>
-          <span className="muted small">The parts of the title each viewer saw, and where they buffered or hit an error.</span>
+          <h3>Viewing coverage</h3>
+          <span className="muted small">The portions of the title each viewer watched, with buffering and errors marked.</span>
         </div>
         <Watched data={data} durationS={i?.durationS ?? null} />
       </section>
@@ -251,7 +271,7 @@ function PlayPage({ id, onError }: { id: number; onError: (e: unknown) => void }
       <section className="card">
         <div className="panel-head">
           <h3>Key moments</h3>
-          <span className="muted small">What changed during the session, and why. Newest first.</span>
+          <span className="muted small">Significant events and their causes, newest first.</span>
         </div>
         <KeyMoments data={data} ctx={ctx} />
       </section>
@@ -298,13 +318,13 @@ function Timeline({ events, ctx }: { events: PlayEvent[]; ctx: EventContext }) {
               </button>
               {open === e.id && (
                 <dl className="grid event-detail">
-                  <dt>Event</dt><dd className="mono">{e.kind}</dd>
+                  <dt>Type</dt><dd>{GROUP_LABELS[groupOf(e)]}</dd>
                   <dt>Time</dt><dd>{dateTime(e.at)}</dd>
-                  <dt>Playback position</dt><dd>{e.posS === null ? "—" : clock(e.posS)}</dd>
-                  <dt>Viewer</dt><dd>{e.userId ? <><Who id={e.userId} name={e.username} /> <span className="mono muted">{e.userId}</span></> : "—"}</dd>
-                  {Object.entries(e.detail ?? {}).map(([k, v]) => (
+                  <dt>Position</dt><dd>{e.posS === null ? "—" : clock(e.posS)}</dd>
+                  {e.userId && <><dt>Viewer</dt><dd><Who id={e.userId} name={e.username} /></dd></>}
+                  {eventDetails(e, ctx).map(([k, v]) => (
                     <span key={k} style={{ display: "contents" }}>
-                      <dt>{k}</dt><dd className="mono">{typeof v === "object" ? JSON.stringify(v) : String(v)}</dd>
+                      <dt>{k}</dt><dd>{v}</dd>
                     </span>
                   ))}
                 </dl>

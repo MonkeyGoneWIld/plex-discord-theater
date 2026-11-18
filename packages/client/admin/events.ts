@@ -288,6 +288,28 @@ export function eventTone(e: PlayEvent): string {
 export const newestFirst = <T extends { at: number; id: number }>(list: T[]): T[] =>
   [...list].sort((a, b) => b.at - a.at || b.id - a.id);
 
+const JUMP_LABELS: Record<string, string> = {
+  "skip intro": "Skip Intro", "skip credits": "Skip Credits", timeline: "Timeline", "jump back": "Jump back", "jump forward": "Jump forward",
+};
+
+export interface Jump { at: number; fromS: number; toS: number; label: string; event: PlayEvent }
+
+/** The room's seeks, oldest first: from where, to where, and what made each (Skip Intro, the timeline, …). */
+export function jumpsOf(events: PlayEvent[]): Jump[] {
+  return events.filter((e) => e.kind === "seek").flatMap((e) => {
+    const fromS = Number(e.detail?.fromS);
+    const toS = Number(e.detail?.toS);
+    if (e.detail?.fromS == null || e.detail?.toS == null || !Number.isFinite(fromS) || !Number.isFinite(toS) || Math.abs(toS - fromS) < 1) return [];
+    return [{ at: e.at, fromS, toS, label: JUMP_LABELS[String(e.detail?.cause)] ?? "Seek", event: e }];
+  });
+}
+
+/** When, and where in the title, the title finished, if it did. */
+export function finishedAt(events: PlayEvent[]): { at: number; posS: number | null } | null {
+  const e = events.find((x) => (x.kind === "ended" || x.kind === "stop") && x.detail?.cause === "finished");
+  return e ? { at: e.at, posS: e.posS } : null;
+}
+
 /** Where in the title the room was at a time, from its track; null in a break or outside it. */
 export function positionAt(track: TrackPoint[], t: number): number | null {
   let before: TrackPoint | null = null;

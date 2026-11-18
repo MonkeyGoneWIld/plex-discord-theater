@@ -90,9 +90,22 @@ export async function backfill(dbPath: string, now: number, days = 45): Promise<
         { t: g, level: "LOG", tag: "Health", msg: "sample", data: { session: "past", httpMB: 0, p2pMB: 0, edgeHitMB: "0", edgeMB: "0", peerKey: keyOf(userId) } },
       ] }));
       const length = Math.round(minutes * (0.4 + rnd() * 0.6)) * 60_000;
+      // Every third session: Skip Intro, then a seek back and one forward on the timeline.
+      const seeks: Array<[number, number, string]> = n % 3 === 0
+        ? [[30_000, 75, "skip intro"], [Math.round((length * 0.4) / 10_000) * 10_000, -300, "timeline"],
+          [Math.round((length * 0.65) / 10_000) * 10_000, 600, "timeline"]]
+        : [];
+      let ahead = 0;
       while (g - start < length) {
         g += 10_000;
-        room.positionS = (g - start) / 1000;
+        const seek = seeks.find(([after]) => after === g - start);
+        if (seek) {
+          const fromS = (g - start) / 1000 + ahead;
+          ahead = Math.max(-(g - start) / 1000, ahead + seek[1]);
+          rec.transport({ at: g, roomId, type: "seek", userId: hostId, username: people[0][1], role: "host", fromS,
+            toS: (g - start) / 1000 + ahead, ratingKey, title, cause: seek[2] } as never);
+        }
+        room.positionS = (g - start) / 1000 + ahead;
         rec.tick(g);
       }
       // What each had from the others, and who sent it: the one before them, or the host.
@@ -123,7 +136,8 @@ export async function backfill(dbPath: string, now: number, days = 45): Promise<
       });
       g += 2_000;
       rec.tick(g);
-      if (rnd() < 0.5) rec.transport({ at: g, roomId, type: "stop", userId: hostId, username: people[0][1], role: "host", fromS: room.positionS, toS: room.positionS } as never);
+      if (rnd() < 0.5) rec.transport({ at: g, roomId, type: "stop", userId: hostId, username: people[0][1], role: "host", fromS: room.positionS, toS: room.positionS,
+        ...(n % 3 === 0 ? { cause: "finished" } : {}) } as never);
       rooms = [];
       g += 2_000;
       rec.tick(g);

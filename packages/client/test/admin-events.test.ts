@@ -7,7 +7,7 @@
  * the room waits only for the host; a player loading the start was
  * "buffering"; tracks were numbers; and the oldest came first.
  */
-import { eventDetails, eventText, eventTone, groupOf, newestFirst, positionAt, streamDiff, trackName, unionParts, variantParts } from "../admin/events";
+import { eventDetails, eventText, eventTone, finishedAt, groupOf, jumpsOf, newestFirst, positionAt, streamDiff, trackName, unionParts, variantParts } from "../admin/events";
 import type { PlayEvent, TrackPoint } from "../admin/types";
 
 let pass = 0;
@@ -124,6 +124,19 @@ check("where the room was: moving on while playing, still while paused, nowhere 
   [105, 110, 110, null, 600, null]);
 check("parts of a title watched, put together where they meet",
   unionParts([[[0, 10], [20, 30]], [[9, 15], [31, 40]], [[50, 50]]]), [[0, 15], [20, 40]]);
+
+// 18 November: the position line and the coverage chart name each seek.
+console.log("\n— seeks on the charts —");
+check("each seek: from, to, and what made it; one without both ends or that went nowhere is left out",
+  jumpsOf([ev("seek", { fromS: 30, toS: 105, cause: "skip intro" }, "alex", 1), ev("play", null, "alex", 2),
+    ev("seek", { fromS: 2_700, toS: 2_400, cause: "timeline" }, "alex", 3), ev("seek", { fromS: 4_200, toS: 5_400 }, "alex", 4),
+    ev("seek", { toS: 90 }, "alex", 5), ev("seek", { fromS: 90, toS: 90.4, cause: "timeline" }, "alex", 6)])
+    .map((j) => [j.at, j.fromS, j.toS, j.label]),
+  [[1, 30, 105, "Skip Intro"], [3, 2_700, 2_400, "Timeline"], [4, 4_200, 5_400, "Seek"]]);
+check("  the title finishing: when and where; closed or stopped part way is not finishing",
+  [finishedAt([ev("stop", { cause: "closed" }, "alex", 1), { ...ev("ended", { reason: "stopped", cause: "finished" }, null, 9), posS: 7_002 }]),
+    finishedAt([ev("ended", { reason: "stopped", cause: "closed" }, null, 9)])],
+  [{ at: 9, posS: 7_002 }, null]);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail > 0 ? 1 : 0);

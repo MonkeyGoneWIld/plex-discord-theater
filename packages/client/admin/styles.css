@@ -592,10 +592,22 @@ a.fact, .fact a { color: var(--accent); }
   background: var(--bad);
 }
 /* Where in the title a session was, along its clock; and what of it each viewer saw. */
-.lane-position .lane-track { height: 64px; }
+.lane-position .lane-track { height: 84px; }
 .position-track { cursor: crosshair; }
 .position-track svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; overflow: visible; }
-.position-line { fill: none; stroke: var(--accent); stroke-width: 2; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
+.position-line { fill: none; stroke: var(--good); stroke-width: 2; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
+.position-line.paused { stroke: var(--muted); stroke-dasharray: 4 4; }
+.position-seek { fill: none; stroke: var(--info); stroke-width: 2; vector-effect: non-scaling-stroke; }
+.position-mark.seek { width: 7px; height: 7px; background: var(--info); }
+.position-label, .jump-label { position: absolute; font-size: 11px; color: var(--muted); white-space: nowrap; pointer-events: none; z-index: 2; }
+.position-grid.mid { stroke: var(--muted); stroke-opacity: .45; stroke-dasharray: 2 4; }
+.lane-jumps .lane-track { height: 44px; background: none; }
+.jumps-track svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; overflow: visible; }
+.jump-arc { fill: none; stroke: var(--info); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.jump-hit { fill: none; stroke: transparent; stroke-width: 10; vector-effect: non-scaling-stroke; cursor: help; }
+.jump-land { position: absolute; bottom: 0; width: 7px; height: 7px; border-radius: 50%; background: var(--info); transform: translate(-50%, 50%); }
+.jump-end { position: absolute; bottom: -4px; width: 2px; height: 16px; background: var(--text); transform: translateX(-50%); }
+.jump-end::after { content: ""; position: absolute; inset: -2px -6px; cursor: help; }
 .position-grid { stroke: var(--border); stroke-width: 1; vector-effect: non-scaling-stroke; }
 .position-mark {
   position: absolute; width: 9px; height: 9px; border-radius: 50%; transform: translate(-50%, -50%); z-index: 2;

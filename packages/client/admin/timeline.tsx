@@ -1,9 +1,9 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { PlayDetail, PlayEvent, TrackPoint } from "./types";
 import { clock, quality, timeOfDay } from "./format";
 import { decisionOf } from "./parts";
 import {
-  eventText, newestFirst, positionAt, streamDiff, streamLabel, switchedText, trackName, unionParts, type EventContext,
+  eventText, finishedAt, jumpsOf, newestFirst, positionAt, streamDiff, streamLabel, switchedText, trackName, unionParts, type EventContext,
 } from "./events";
 import { Icon } from "./icons";
 import { Avatar } from "./viz";
@@ -61,52 +61,116 @@ function Lane({ label, sub, segs, marks, start, end }: {
   );
 }
 
-/** The room's position in the title along the session: a line that climbs as it plays, flat while paused, jumping at a seek. */
-function PositionLane({ track, start, end, durationS, marks }: {
+/** Which labels to show along a line, left to right: one that would run into the last shown is left to its mark's hover. */
+function spaced(xs: number[], gap: number): boolean[] {
+  const order = xs.map((x, i) => [x, i] as const).sort((a, b) => a[0] - b[0]);
+  const show = xs.map(() => false);
+  let last = -Infinity;
+  for (const [x, i] of order) if (x - last >= gap) { show[i] = true; last = x; }
+  return show;
+}
+
+/** An element's width in pixels, kept up to date: labels are spaced by what fits, on a phone as on a desktop. */
+function useWidth<T extends HTMLElement>(): [(el: T | null) => void, number] {
+  // A callback ref: the element can appear after the first render (a lane drawn once there is something in it).
+  const [el, setEl] = useState<T | null>(null);
+  const [width, setWidth] = useState(0);
+  useEffect(() => {
+    if (!el) return;
+    setWidth(el.getBoundingClientRect().width);
+    if (typeof ResizeObserver === "undefined") return;
+    const watch = new ResizeObserver(([entry]) => setWidth(entry.contentRect.width));
+    watch.observe(el);
+    return () => watch.disconnect();
+  }, [el]);
+  return [setEl, width];
+}
+
+/** The room a label needs, as a share of a track's width. */
+const labelGap = (width: number) => (width > 0 ? (76 / width) * 100 : 12);
+
+/** A label beside a point, kept inside the track: above it or below, and anchored away from the edges. */
+const labelAt = (left: number, top: number, above: boolean) => {
+  const up = top < 22 ? false : top > 78 ? true : above;
+  return { left: `${left}%`, top: `${top}%`,
+    transform: `translate(${left > 88 ? "-100%" : left < 6 ? "0" : "-50%"}, ${up ? "calc(-100% - 5px)" : "5px"})` };
+};
+
+/**
+ * The room's position in the title along the session: a line that climbs as
+ * it plays and runs flat, dashed, while paused; each seek a step, named by
+ * what made it.
+ */
+function PositionLane({ track, start, end, durationS, marks, jumps, finished }: {
   track: TrackPoint[];
   start: number;
   end: number;
   durationS: number;
   marks: Array<{ at: number; posS: number; tone: string; title: string }>;
+  jumps: Array<{ at: number; posS: number; label: string; title: string; forward: boolean }>;
+  finished: { at: number; posS: number } | null;
 }) {
   const [hover, setHover] = useState<number | null>(null);
+  const [trackRef, trackWidth] = useWidth<HTMLDivElement>();
   const W = 1000;
-  const H = 60;
+  const H = 84;
   const x = (t: number) => ((t - start) / (end - start)) * W;
-  const y = (p: number) => H - 2 - (Math.min(p, durationS) / durationS) * (H - 4);
-  let d = "";
-  for (let i = 0; i < track.length; i++) {
-    const [t, p] = track[i];
-    if (p < 0) continue;
-    const prev = i > 0 ? track[i - 1] : null;
-    if (!prev || prev[1] < 0) { d += `M${x(t).toFixed(1)},${y(p).toFixed(1)}`; continue; }
-    // Where it would be by now, from the point before: on, playing; still, paused.
-    const expected = prev[2] ? prev[1] + (t - prev[0]) / 1000 : prev[1];
-    const jumped = Math.abs(p - expected) > 3;
-    d += `L${x(t).toFixed(1)},${y(jumped ? Math.max(0, expected) : p).toFixed(1)}`;
-    if (jumped) d += `M${x(t).toFixed(1)},${y(p).toFixed(1)}`;
+  const y = (p: number) => H - 4 - (Math.min(p, durationS) / durationS) * (H - 8);
+  const pt = (t: number, p: number) => `${x(t).toFixed(1)},${y(p).toFixed(1)}`;
+  let played = "";
+  let paused = "";
+  let seeks = "";
+  let prev: TrackPoint | null = null;
+  for (const cur of track) {
+    if (cur[1] < 0) { prev = null; continue; }
+    if (prev) {
+      // Where it would be by now, from the point before: on, playing; still, paused.
+      const expected = prev[2] ? prev[1] + (cur[0] - prev[0]) / 1000 : prev[1];
+      const jumped = Math.abs(cur[1] - expected) > 3;
+      const reached = jumped ? Math.max(0, expected) : cur[1];
+      const piece = `M${pt(prev[0], prev[1])}L${pt(cur[0], reached)}`;
+      if (prev[2]) played += piece; else paused += piece;
+      if (jumped) seeks += `M${pt(cur[0], reached)}L${pt(cur[0], cur[1])}`;
+    }
+    prev = cur;
   }
   const last = [...track].reverse().find((p) => p[1] >= 0);
   if (last && last[0] < end) {
     const p = last[2] ? Math.min(durationS, last[1] + (end - last[0]) / 1000) : last[1];
-    if (track.length === 1) d = `M${x(last[0]).toFixed(1)},${y(last[1]).toFixed(1)}`;
-    d += `L${x(end).toFixed(1)},${y(p).toFixed(1)}`;
+    const piece = `M${pt(last[0], last[1])}L${pt(end, p)}`;
+    if (last[2]) played += piece; else paused += piece;
   }
+  const left = (t: number) => (x(t) / W) * 100;
+  const top = (p: number) => (y(p) / H) * 100;
+  // The title finishing is labelled too, so it takes its turn among the seeks.
+  const shown = spaced([...jumps.map((j) => left(j.at)), finished ? left(finished.at) : -Infinity], labelGap(trackWidth));
   const at = hover === null ? null : start + (end - start) * hover;
   const posAt = at === null ? null : positionAt(track, at);
   return (
     <div className="lane lane-position">
-      <div className="lane-label">Position<span className="muted small">0:00 – {clock(durationS)}</span></div>
-      <div className="lane-track position-track"
+      <div className="lane-label">Position<span className="muted small">0:00 – {clock(durationS)}</span>
+        <span className="muted small">Midline {clock(durationS / 2)}</span></div>
+      <div className="lane-track position-track" ref={trackRef}
         onMouseMove={(e) => {
           const r = e.currentTarget.getBoundingClientRect();
           setHover(Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)));
         }}
         onMouseLeave={() => setHover(null)}>
         <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" aria-hidden="true">
-          {[0.25, 0.5, 0.75].map((f) => <line key={f} className="position-grid" x1={0} x2={W} y1={y(durationS * f)} y2={y(durationS * f)} />)}
-          <path className="position-line" d={d} />
+          {[0.25, 0.5, 0.75].map((f) => <line key={f} className={`position-grid${f === 0.5 ? " mid" : ""}`} x1={0} x2={W} y1={y(durationS * f)} y2={y(durationS * f)} />)}
+          <path className="position-line paused" d={paused} />
+          <path className="position-line" d={played} />
+          <path className="position-seek" d={seeks} />
         </svg>
+        {jumps.map((j, i) => (
+          <span key={`j${i}`} className="position-mark seek" title={j.title} style={{ left: `${left(j.at)}%`, top: `${top(j.posS)}%` }} />
+        ))}
+        {jumps.map((j, i) => shown[i] && (
+          <span key={`l${i}`} className="position-label" style={labelAt(left(j.at), top(j.posS), j.forward)}>{j.label}</span>
+        ))}
+        {finished && shown[jumps.length] && (
+          <span className="position-label" style={labelAt(left(finished.at), top(finished.posS), true)}>Finished</span>
+        )}
         {marks.map((m, i) => (
           <span key={i} className={`position-mark ${m.tone}`} title={m.title}
             style={{ left: `${(x(m.at) / W) * 100}%`, top: `${(y(m.posS) / H) * 100}%` }} />
@@ -154,11 +218,16 @@ export function SessionChart({ data, durationS, ctx }: { data: PlayDetail; durat
   // Where in the title things went wrong, on the position line.
   const problems = events.filter((e) => (e.kind === "buffering" || e.kind === "player error") && e.posS !== null)
     .map((e) => ({ at: e.at, posS: e.posS!, tone: e.kind === "player error" ? "error" : "bad", title: markTitle(e, ctx) }));
+  // Each seek on the position line, named by what made it; and the title finishing.
+  const jumps = jumpsOf(events).map((j) => ({ at: j.at, posS: j.toS, label: j.label, title: markTitle(j.event, ctx), forward: j.toS > j.fromS }));
+  const done = finishedAt(events);
+  const finished = done ? { at: done.at, posS: done.posS ?? positionAt(track, done.at) ?? length } : null;
 
   return (
     <div className="session-chart" role="img" aria-label="Session timeline: playback, position in the title, streams and viewers over time">
       <Lane label="Playback" segs={[...playback, ...held]} marks={marks} start={start} end={end} />
-      {track.some((p) => p[1] >= 0) && <PositionLane track={track} start={start} end={end} durationS={length} marks={problems} />}
+      {track.some((p) => p[1] >= 0) && <PositionLane track={track} start={start} end={end} durationS={length} marks={problems}
+        jumps={jumps} finished={finished} />}
       {streams.map((s, i) => {
         const d = decisionOf(s);
         const to = s.endedAt ?? end;
@@ -212,6 +281,7 @@ export function SessionChart({ data, durationS, ctx }: { data: PlayDetail; durat
 
 /** What of the title each viewer saw, and where they buffered or hit an error, along the title's own clock. */
 export function Watched({ data, durationS }: { data: PlayDetail; durationS: number | null }) {
+  const [trackRef, trackWidth] = useWidth<HTMLDivElement>();
   const watched = data.watched ?? {};
   const length = Math.max(durationS ?? 0, ...Object.values(watched).flat().map((p) => p[1]), ...data.events.map((e) => e.posS ?? 0), 1);
   const pos = (s: number) => Math.min(100, Math.max(0, (s / length) * 100));
@@ -235,9 +305,49 @@ export function Watched({ data, durationS }: { data: PlayDetail; durationS: numb
     );
   };
   const trouble = (userId: string | null) => data.events.filter((e) => (e.kind === "buffering" || e.kind === "player error") && (!userId || e.userId === userId));
+  // Each seek as an arc over the title, from where it was to where it landed.
+  const jumps = jumpsOf(data.events);
+  const done = finishedAt(data.events);
+  const arcs = jumps.map((j) => {
+    const x1 = pos(j.fromS) * 10;
+    const x2 = pos(j.toS) * 10;
+    const apex = 44 - Math.min(38, 10 + Math.abs(x2 - x1) * 0.08);
+    return { j, x1, x2, apex, mid: (x1 + x2) / 20, d: `M${x1.toFixed(1)},44 Q${((x1 + x2) / 2).toFixed(1)},${(2 * apex - 44).toFixed(1)} ${x2.toFixed(1)},44` };
+  });
+  const endAt = done && done.posS !== null ? pos(done.posS) : null;
+  const shown = spaced([...arcs.map((a) => a.mid), endAt ?? -Infinity], labelGap(trackWidth));
   if (all.length === 0) return <p className="muted">Playback position was not recorded for this session.</p>;
   return (
     <div className="session-chart watched-chart" role="img" aria-label="Portions of the title each viewer watched">
+      {(arcs.length > 0 || endAt !== null) && (
+        <div className="lane lane-jumps">
+          <div className="lane-label">Seeks<span className="muted small">{arcs.length} {arcs.length === 1 ? "seek" : "seeks"}</span></div>
+          <div className="lane-track jumps-track" ref={trackRef}>
+            <svg viewBox="0 0 1000 44" preserveAspectRatio="none">
+              {arcs.map((a, i) => (
+                <g key={i}>
+                  <path className="jump-arc" d={a.d} />
+                  <path className="jump-hit" d={a.d}><title>{`${timeOfDay(a.j.at)} · ${eventText(a.j.event)}`}</title></path>
+                </g>
+              ))}
+            </svg>
+            {arcs.map((a, i) => <span key={`d${i}`} className="jump-land" style={{ left: `${pos(a.j.toS)}%` }} />)}
+            {arcs.map((a, i) => shown[i] && (
+              <span key={`l${i}`} className="jump-label" style={{ left: `${a.mid}%`, top: `${(a.apex / 44) * 100}%`,
+                transform: `translate(${a.mid > 88 ? "-100%" : a.mid < 6 ? "0" : "-50%"}, calc(-100% - 2px))` }}>{a.j.label}</span>
+            ))}
+            {endAt !== null && (
+              <>
+                <span className="jump-end" title={`Finished at ${clock(done!.posS!)} · ${timeOfDay(done!.at)}`} style={{ left: `${endAt}%` }} />
+                {shown[arcs.length] && (
+                  <span className="jump-label" style={{ left: `${endAt}%`, top: "20%",
+                    transform: `translate(${endAt > 88 ? "-100%" : "-50%"}, -50%)` }}>Finished</span>
+                )}
+              </>
+            )}
+          </div>
+        </div>
+      )}
       {data.viewers.length > 1 && row("all", "All viewers", all, trouble(null))}
       {data.viewers.map((v) => row(v.userId,
         <span className="lane-person"><Avatar id={v.userId} name={v.username} size={20} />{v.username ?? v.userId}</span>,
@@ -252,6 +362,7 @@ export function Watched({ data, durationS }: { data: PlayDetail; durationS: numb
       </div>
       <ul className="legend chart-key">
         <li><span className="swatch" style={{ background: "var(--accent)" }} />Watched</li>
+        {arcs.length > 0 && <li><span className="swatch" style={{ background: "var(--info)" }} />Seek</li>}
         <li><span className="swatch mark" style={{ background: "var(--bad)" }} />Buffering</li>
         <li><span className="swatch error-key" />Player error</li>
       </ul>

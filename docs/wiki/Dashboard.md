@@ -31,7 +31,7 @@ password.
    [Admin] dashboard listening url=http://localhost:3050
    ```
 
-4. Open `http://<your server>:3050` and sign in.
+4. Open `http://<your server>:3050` and sign in. It opens on Now Playing.
 
 | Setting | Default | Description |
 |---|---|---|
@@ -56,7 +56,10 @@ command. See [Configuration Reference](Configuration-Reference#access-and-securi
   reach it.
 - Each address gets 10 sign-in attempts every 15 minutes. A wrong password is
   logged with the address it came from.
-- A sign-in lasts 12 hours. Restarting the container signs everyone out.
+- A sign-in lasts until you sign out, through restarts of the container.
+  Changing `ADMIN_PASSWORD` signs everyone out. Each port has its own
+  sign-in, so two servers' dashboards on one machine don't sign each other
+  out.
 - Secrets are never shown. A setting whose name ends in `KEY`, `TOKEN`,
   `SECRET`, `PASSWORD` or similar shows only that it is set. Tokens are removed
   from URLs and from log lines.
@@ -78,11 +81,13 @@ Updated every 2 seconds. The browser tab shows how many sessions are active.
 
 **Each session**
 
-- The title's poster, its name, and whether it is playing, paused or
-  buffering.
+- The title's poster, its name, and whether it is playing, paused or waiting.
+  The room waits only for the host's picture, and says why: starting, after
+  a seek, or the host changing the audio. Anyone not ready yet catches up
+  while it plays.
 - A progress bar with the position, the running time and the time left.
-- The host, how many are watching, the Discord server and channel, and when
-  the room opened.
+- The host, how many are watching, the Discord server and channel by name,
+  and when the room opened.
 - The bitrate its players need, the data delivered so far, and buffering in
   green, amber or red.
 - **Delivery, last 10 minutes.** A live graph of what the players received
@@ -99,13 +104,15 @@ Updated every 2 seconds. The browser tab shows how many sessions are active.
 - For a transcode, the reason in a sentence.
 
 Select a stream for its details, in four groups: video, audio, delivery and
-identifiers.
+identifiers. Audio and subtitle tracks show by name, with Plex's number beside.
 
-**Each viewer** shows their role, whether they are watching, buffering, away
-or disconnected, which stream they are on, how long they have watched, the
-data they received with its split, and their buffering. Select a viewer for
-their Discord user ID, quality limit, subtitle track, and what their device
-can play.
+**Each viewer** shows their role and their player's state, from what it last
+reported: watching, loading (as they start, or after a seek), buffering and
+for how long, away or disconnected. Then which stream they are on, how long
+they have watched, the data they received with its split, and their
+buffering. Loading is not buffering and isn't counted as it. Select a viewer
+for their Discord user ID, quality limit, subtitle track by name, and what
+their device can play.
 
 When everyone leaves a room, its session is kept for a short time so the host
 can return and continue. When a viewer on a stream of their own leaves, that
@@ -131,14 +138,22 @@ Select a session to open it:
 | Summary | How it ended, time played, viewers, streams, data delivered and buffering, then where the data came from |
 | Viewers | Each person's role, watch time, data received and buffering |
 | Streams | Each stream, as on Now Playing |
-| Session overview | A chart of the session over time: one row for playback (playing, paused, held), one for each stream and one for each viewer, with marks where something changed. Hover any bar or mark for details. |
-| Key moments | The events that explain the session, each with its reason: a stream starting and why, a viewer changing stream, quality or subtitles, long buffering, and errors. This is where to look when a second stream started part way through. |
-| All events | Every event in order, with filters for playback, viewers, streams and tracks, and buffering and errors. Select an event for its details. |
+| Session overview | A chart of the session over time: one row for playback (playing, paused, waiting for the host), one for where in the title it was, one for each stream and one for each viewer, with marks where something changed. Buffering and player errors sit on the position line where they happened, so a bad part of a file shows. Hover any bar, line or mark for details. |
+| What was watched | One bar per viewer across the whole title, and one for anyone: the parts they saw, with buffering (a red bar) and player errors (a red diamond) where they happened in the title. |
+| Key moments | The events that explain the session, newest first, each with its reason: a stream starting and why, the host changing a track and who moved with them, a viewer changing stream, quality or subtitles, long buffering, and errors. This is where to look when a second stream started part way through. |
+| All events | Every event, newest first, with filters for playback, viewers, streams and tracks, and loading, buffering and errors. Someone joining starts on a stream; they don't switch to it. Select an event for its details. |
+
+Loading the start of a stream, or after a seek, is shown as loading, not
+buffering. History recorded by earlier versions is corrected the first time
+the server starts on it.
 
 ## Statistics
 
-Trends over the last 7 days, 30 days, 90 days, a year, or all time. Days and
-hours are in your local time, and a session counts on the day it started.
+Trends over the last 24 hours, 7 days, 30 days, 90 days, a year, all time, or
+a period of your own under **Custom…**: the last so many hours or days, from
+one date to another (21 September to 1 October, both whole days), or from one
+time to another. Three days or less is shown by the hour. Days and hours are
+in your local time, and a session counts on the day it started.
 
 - Sessions, watch time, users, data delivered, the share of streams
   transcoded, and buffering.
@@ -148,6 +163,18 @@ hours are in your local time, and a session counts on the day it started.
 - Sessions by hour of the day and by weekday.
 - The most watched titles, the most active users, and the most active Discord
   servers.
+
+**Server upload** is everything the server's port sent in the period: video,
+playlists, subtitles and the page, measured as it leaves. The page says since
+when.
+
+- In total, on average while something played, at the 95th percentile, and
+  in its busiest minute, in Mbps and MiB/s.
+- The same by how many were watching, with **Sent ÷ bitrate**: what the
+  server sent over the bitrate of the one stream playing. Use it to set the
+  qBittorrent manager; see
+  [qBittorrent Manager API](qBittorrent-Manager-API#setting-it-from-your-own-figures).
+- What was sent, and the busiest minute, per hour or day.
 
 **Show table** switches any chart to a table of its numbers.
 
@@ -165,9 +192,11 @@ Each Discord server the Activity was used in, and each of its channels:
 launches, joins, users, sessions and time played. Below, every launch and join,
 newest first.
 
-Discord shares server and channel IDs with an Activity, not their names. To
-match an ID, turn on Developer Mode in Discord, then right-click the server or
-channel and choose **Copy ID**.
+Servers and channels show by name, here and on every page. A server's name is
+learned when someone opens the Activity in it, and a channel's when the
+Activity runs in it. Until then the ID shows; hover a name for its ID. To
+match an ID yourself, turn on Developer Mode in Discord, then right-click the
+server or channel and choose **Copy ID**.
 
 ## Requests
 
@@ -219,7 +248,12 @@ folder:
   bitrate, who it was made for, and when it started and ended.
 - **Each event:** plays, pauses and seeks with who did them, people joining
   and leaving, track and quality changes, buffering and errors.
+- **Where in the title:** the room's position, and each player's, every 10
+  seconds.
 - **Usage:** each launch of the Activity and each person joining a room.
+- **Upload:** what the server's port sent, each minute, with how many were
+  watching and the bitrate of the streams playing.
+- **Names:** the names of Discord servers and channels.
 - **Requests:** each title requested through Seerr.
 
 Nothing is deleted unless you delete it on the System page. Without
@@ -237,10 +271,11 @@ A signed-in browser can read everything as files or JSON.
 | `/api/history/<id>` | One session: its viewers, streams and events |
 | `/api/people`, `/api/people/<id>` | Users, and one user |
 | `/api/places` | Each Discord server and its channels |
+| `/api/names` | The names of Discord servers and channels, by ID |
 | `/api/usage` | Launches and joins, newest first |
 | `/api/requests` | Title requests, with Seerr's current status |
 | `/api/caches` | Each cache and what it holds |
-| `/api/graphs` | Statistics by day. `?days=` is the period: 30 unless given, 0 for all time. `?tz=` is the time zone the days, hours and weekdays are in, such as `Europe/London`: UTC unless given. |
+| `/api/graphs` | Statistics by hour or day, and the server's upload. `?days=` is the period: 30 unless given, 0 for all time. `?hours=` is the last so many hours instead, and `?from=` with `?to=`, in milliseconds since 1970, a period of its own. `?tz=` is the time zone the days, hours and weekdays are in, such as `Europe/London`: UTC unless given. |
 | `/api/export/<list>.csv`, `.json` | `history`, `people`, `usage` or `requests`, as a file. `?q=` is the list's search. At most 200,000 rows. |
 | `/api/export/admin.sqlite` | A copy of the whole history database |
 

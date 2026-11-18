@@ -59,6 +59,7 @@ import { MAX_PARTS, PARTS_AT_ONCE_BESIDE, edgeCacheOf, edgeTotals, resetEdgeTota
 import { NEXT_NEEDED_SLACK_S, nextNeededSegment, type ListedSegment } from "../lib/nextNeeded";
 import { guardPieceLoads, keyframeGroups, leadInBytes, opensOnKeyframe } from "../lib/keyframeGroups";
 import { keepStats, stopKeepingSegments } from "../lib/segmentKeep";
+import { fragLoadFailure, freshUrl, mayEndAtBreak } from "../lib/segmentRetry";
 import { installTakeFromPeer } from "../lib/takeFromPeer";
 import { peerIdPrefix } from "../lib/peerSpeeds";
 import { connectionsSeen, watchPeerConnections } from "../lib/peerConnections";
@@ -2050,6 +2051,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   const mediaErrorCountRef = useRef(0);
   const lastMediaErrorAtRef = useRef(0);
   const lastFatalErrorAtRef = useRef(0);
+  // The fragment the last fatal load error was for, and on which stream — see
+  // the NETWORK_ERROR branch of the fatal-error handler.
+  const lastFatalFragRef = useRef<{ hls: unknown; sn: number } | null>(null);
   // Whether a stream that can't go on may just end here — see brokenStreamCanEnd.
   // A ref because the HLS error handler outlives the render it was made in.
   const brokenStreamCanEndRef = useRef<(breakAtS: number) => boolean>(() => false);
@@ -5163,6 +5167,13 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         /** How many parts each segment was asked for in, for the log. */
         const partsAsked = new Map<string, number>();
         /**
+         * Segments that failed to load, and how often: asked for again past
+         * every cache, the browser's and Discord's, under an address of their
+         * own. On 15 November one segment of Verity failed for twelve minutes,
+         * every try the same; a bad answer kept anywhere would have been.
+         */
+        const failedSegs = new Map<string, number>();
+        /**
          * A follower's landing a little past the room, until its playlist
          * says where the segments are — see the landing, and LEVEL_LOADED.
          */
@@ -5292,11 +5303,15 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                 httpRequestSetup: async (url, _byteRange, signal, requestByteRange) => {
                   const headers: Record<string, string> = {};
                   if (token) headers["Authorization"] = `Bearer ${token}`;
+                  // One that failed before, past the caches: see failedSegs.
+                  const failed = failedSegs.get(url) ?? 0;
+                  const asked = failed ? freshUrl(url, failed) : url;
+                  const init: RequestInit = failed ? { headers, signal, cache: "reload" } : { headers, signal };
                   if (requestByteRange) {
                     // The rest of a segment begun elsewhere, in one piece.
                     const end = requestByteRange.end != null ? requestByteRange.end : "";
                     headers["Range"] = `bytes=${requestByteRange.start}-${end}`;
-                    return new Request(url, { headers, signal });
+                    return new Request(asked, init);
                   }
                   // A copied segment, whose size its URL carries, comes in
                   // parts — always the same ones, for a page after this one
@@ -5304,7 +5319,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                   // many of them at once as partsAtOnce says. Any whole
                   // segment comes from what this page or the one before kept,
                   // if it is there, and is kept (lib/segmentKeep).
-                  const request = keepLater(new Request(url, { headers, signal }));
+                  const request = keepLater(new Request(asked, init));
                   const bytes = segmentBytesOf(url);
                   if (!bytes) return request;
                   partsAsked.set(url, partsFor(bytes));
@@ -5321,6 +5336,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
 
                 const eng = engineLoaderRef.current;
                 hls.p2pEngine.addEventListener("onSegmentLoaded", ({ segmentUrl, bytesLength, downloadSource }) => {
+                  failedSegs.delete(segmentUrl);
                   if (downloadSource === "p2p") stats.p2pBytes += bytesLength;
                   else stats.httpBytes += bytesLength;
                   eng.lastLoadedSeg = segIndexFromUrl(segmentUrl);
@@ -5353,9 +5369,17 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                     (error instanceof Error ? error.message : String(error));
                   eng.lastEventAt = Date.now();
                   eng.errors++;
-                  if ((error as { type?: string } | null)?.type !== "abort") eng.lastErrorAt = eng.lastEventAt;
+                  const aborted = (error as { type?: string } | null)?.type === "abort";
+                  if (!aborted) eng.lastErrorAt = eng.lastEventAt;
+                  if (!aborted && downloadSource !== "p2p") failedSegs.set(segment.url, (failedSegs.get(segment.url) ?? 0) + 1);
+                  if (failedSegs.size > 200) failedSegs.delete(failedSegs.keys().next().value!);
+                  // What the answer was — "part 3 of 8: HTTP 410", "… bytes,
+                  // expected …" — which the type alone never said.
+                  const message = error instanceof Error ? error.message : "";
                   logWarn("P2P", "segment error", {
                     seg: eng.lastErrorSeg, source: downloadSource, error: eng.lastError,
+                    ...(message && message !== eng.lastError ? { message } : {}),
+                    ...(failedSegs.get(segment.url) ? { failures: failedSegs.get(segment.url) } : {}),
                   });
                 });
                 hls.p2pEngine.addEventListener("onSegmentAbort", () => {
@@ -6215,7 +6239,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         // the media and rebuild budgets refill on time instead (see
         // FATAL_ERROR_RESET_MS), or a fragment that downloads and won't play
         // resets the very counter meant to stop it.
-        hls.on(Hls.Events.FRAG_LOADED, () => {
+        hls.on(Hls.Events.FRAG_LOADED, (_e, loaded) => {
+          if (lastFatalFragRef.current?.hls === hls && lastFatalFragRef.current.sn === loaded.frag.sn) lastFatalFragRef.current = null;
           if (mounted) {
             setError(null);
             // Not the loading screen: a segment arriving isn't the picture
@@ -6553,8 +6578,22 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             return;
           }
 
+          // A segment that won't load, failing again after startLoad: asking
+          // for it once more gets the same answer. A rebuild makes the
+          // stream's segments again — see lib/segmentRetry.
+          const sn = typeof data.frag?.sn === "number" ? data.frag.sn : null;
+          const { fragLoad, failedAgain } = fragLoadFailure(data.details, sn,
+            lastFatalFragRef.current?.hls === hls ? lastFatalFragRef.current.sn : null);
+          if (fragLoad && sn !== null) lastFatalFragRef.current = { hls, sn };
+          if (failedAgain) {
+            logWarn("HLS", "the same segment failed to load again, rebuilding the stream", {
+              sn, fragStartS: data.frag?.start, httpStatus: data.response?.code, details: data.details,
+              owner: ownsSessionRef.current,
+            });
+          }
+
           // NETWORK_ERROR: try hls.startLoad() first (transient failures)
-          if (data.type === Hls.ErrorTypes.NETWORK_ERROR && networkRetryRef.current < MAX_NETWORK_RETRIES) {
+          if (data.type === Hls.ErrorTypes.NETWORK_ERROR && !failedAgain && networkRetryRef.current < MAX_NETWORK_RETRIES) {
             networkRetryRef.current++;
             logWarn("HLS", "network retry via startLoad", {
               attempt: networkRetryRef.current,
@@ -6570,8 +6609,11 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           // ends there instead — at the fragment that failed, which hls.js can
           // have reached two minutes ahead of the playhead, or else the playhead.
           // Everyone on the stream hits the same break, so each client ends on
-          // its own, as with `ended`.
-          if (endAtBreak(typeof data.frag?.start === "number" ? data.frag.start : positionForRoom())) return;
+          // its own, as with `ended`. Not a segment that didn't load: that is
+          // the way to the bot failing, not the stream ending, and a rebuild
+          // fetches it again — until the rebuilds run out.
+          const rebuildsLeft = ownsSessionRef.current ? recoveryAttemptRef.current < MAX_RECOVERY_ATTEMPTS : retryCountRef.current < MAX_VIEWER_RETRIES;
+          if (mayEndAtBreak(fragLoad, rebuildsLeft) && endAtBreak(typeof data.frag?.start === "number" ? data.frag.start : positionForRoom())) return;
 
           // Viewer: retry by bumping retryKey
           if (!ownsSessionRef.current) {

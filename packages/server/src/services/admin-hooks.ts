@@ -61,10 +61,27 @@ export interface RequestEvent {
   title?: Promise<string | null>;
 }
 
+/** A Discord server's or channel's name, as somebody signing in saw it. */
+export interface PlaceEvent {
+  at: number;
+  kind: "guild" | "channel";
+  id: string;
+  name: string;
+  guildId?: string | null;
+}
+
+/** What the bot's port sent since the last one (services/upload-meter.ts). */
+export interface SentEvent {
+  at: number;
+  bytes: number;
+}
+
 export interface AdminHooks {
   transport(e: TransportEvent): void;
   clientLog(e: ClientLogEvent): void;
   request(e: RequestEvent): void;
+  place(e: PlaceEvent): void;
+  sent(e: SentEvent): void;
 }
 
 let current: Partial<AdminHooks> | null = null;
@@ -92,4 +109,6 @@ export const adminHooks = {
   transport: (e: TransportEvent) => call("transport", e),
   clientLog: (e: ClientLogEvent) => call("clientLog", e),
   request: (e: RequestEvent) => call("request", e),
+  place: (e: PlaceEvent) => call("place", e),
+  sent: (e: SentEvent) => call("sent", e),
 };

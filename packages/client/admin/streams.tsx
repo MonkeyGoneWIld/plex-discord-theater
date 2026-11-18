@@ -2,6 +2,7 @@ import { useState, type ReactNode } from "react";
 import type { Notes } from "./types";
 import { ago, clock, quality, rate, dateTime, timeOfDay } from "./format";
 import { decisionOf, NOTE_LABELS } from "./parts";
+import { trackName } from "./events";
 import { Icon } from "./icons";
 import { Avatar } from "./viz";
 
@@ -39,6 +40,8 @@ export interface StreamInfo {
   startedAt?: number;
   endedAt?: number | null;
   peakViewers?: number;
+  /** The title's tracks' names, by Plex stream id. */
+  tracks?: Record<string, string> | null;
 }
 
 /** "4K", "1080p": a picture's size as people say it, from "3840×2160". */
@@ -159,8 +162,10 @@ export function StreamCard({ s }: { s: StreamInfo }) {
             {row("Source", n.audioFrom ? String(n.audioFrom) : "—")}
             {row("Output", audioConverted ? `${n.audioTo ?? "Converted"}${n.audioKbps ? ` · ${n.audioKbps} kbps` : ""}` : n.audio === "copy" ? "Unchanged" : "—")}
             {audioConverted && row("Reason", n.audioReason ? String(n.audioReason) : "Not reported")}
-            {row("Audio track", s.audioStreamId ?? "—", true)}
-            {row("Burned-in subtitle track", s.subtitleStreamId || "None", true)}
+            {row("Audio track", s.audioStreamId === null ? "—"
+              : <>{trackName(s, s.audioStreamId, "Default")} {s.audioStreamId ? <span className="mono muted">{s.audioStreamId}</span> : null}</>)}
+            {row("Burned-in subtitle track", !s.subtitleStreamId ? "None"
+              : <>{trackName(s, s.subtitleStreamId)} <span className="mono muted">{s.subtitleStreamId}</span></>)}
           </Group>
           <Group icon="upload" title="Delivery">
             {row("Engine", s.engine === "ffmpeg" ? "FFmpeg" : s.engine === "plex" ? "Plex" : "—")}

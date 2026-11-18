@@ -2,7 +2,7 @@ import { useState } from "react";
 import { api } from "./api";
 import type { PlaceGuild, UsageRow } from "./types";
 import { clock, dateTime } from "./format";
-import { Downloads, useLoad, Who } from "./parts";
+import { Downloads, PlaceName, useLoad, Who } from "./parts";
 
 const PAGE = 50;
 
@@ -17,8 +17,8 @@ export function Places({ onError }: { onError: (e: unknown) => void }) {
         <p className="muted">Where the Activity is used: each Discord server and channel, with its launches, viewers and sessions.</p>
       </div>
       <p className="note">
-        Discord shares server and channel IDs with an Activity, not their names. To match an ID in Discord, enable
-        Developer Mode, then right-click the server or channel and choose Copy ID.
+        Discord gives an Activity only server and channel IDs. Their names are learned as people use it: a server's when
+        somebody signs in there, a channel's when the Activity opens in it. Until then the ID is shown; hover a name for its ID.
       </p>
       {busy && !data ? <p className="empty">Loading…</p> : guilds.length === 0
         ? <section className="card"><p className="empty">No launches have been recorded yet.</p></section>
@@ -33,7 +33,8 @@ function GuildCard({ g }: { g: PlaceGuild }) {
     <section className="card">
       <header className="room-head">
         <div>
-          <h3>{g.guildId ? <>Server <span className="mono">{g.guildId}</span></> : "Direct message or group chat"}</h3>
+          <h3>{g.guildId ? <PlaceName kind="guild" id={g.guildId} /> : "Direct message or group chat"}</h3>
+          {g.guildId && <div className="muted small mono">Server ID {g.guildId}</div>}
           <div className="room-meta">
             <span>{g.channels.length} {g.channels.length === 1 ? "channel" : "channels"}</span>
             <span>{g.launches} {g.launches === 1 ? "launch" : "launches"}</span>
@@ -49,12 +50,12 @@ function GuildCard({ g }: { g: PlaceGuild }) {
       <div className="table-wrap">
         <table className="table">
           <thead>
-            <tr><th>Channel ID</th><th>Launches</th><th>Joins</th><th>Users</th><th>Sessions</th><th>Time played</th><th>First active</th><th>Last active</th></tr>
+            <tr><th>Channel</th><th>Launches</th><th>Joins</th><th>Users</th><th>Sessions</th><th>Time played</th><th>First active</th><th>Last active</th></tr>
           </thead>
           <tbody>
             {g.channels.map((c) => (
               <tr key={c.channelId ?? "none"}>
-                <td className="mono">{c.channelId ?? "—"}</td>
+                <td><PlaceName kind="channel" id={c.channelId} /></td>
                 <td>{c.launches || "—"}</td>
                 <td>{c.joins || "—"}</td>
                 <td className="caps">
@@ -92,7 +93,7 @@ function Launches({ onError }: { onError: (e: unknown) => void }) {
       {busy && !data ? <p className="empty">Loading…</p> : rows.length === 0 ? <p className="empty">None recorded yet.</p> : (
         <div className="table-wrap">
           <table className="table">
-            <thead><tr><th>Time</th><th>Event</th><th>User</th><th>Discord user ID</th><th>Server ID</th><th>Channel ID</th><th>Room</th></tr></thead>
+            <thead><tr><th>Time</th><th>Event</th><th>User</th><th>Discord user ID</th><th>Server</th><th>Channel</th><th>Room</th></tr></thead>
             <tbody>
               {rows.map((u) => (
                 <tr key={u.id}>
@@ -100,8 +101,8 @@ function Launches({ onError }: { onError: (e: unknown) => void }) {
                   <td>{kindName(u.kind)}</td>
                   <td><Who id={u.userId} name={u.username} /></td>
                   <td className="mono">{u.userId ?? "—"}</td>
-                  <td className="mono">{u.guildId ?? "—"}</td>
-                  <td className="mono">{u.channelId ?? "—"}</td>
+                  <td><PlaceName kind="guild" id={u.guildId} /></td>
+                  <td><PlaceName kind="channel" id={u.channelId} /></td>
                   <td className="mono">{u.roomId ?? "—"}</td>
                 </tr>
               ))}

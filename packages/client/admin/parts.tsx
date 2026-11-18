@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 import { exportUrl } from "./api";
-import type { Notes, PlayEvent, ViewerData } from "./types";
-import { bytes, clock, quality, rate, short } from "./format";
+import type { Notes, ViewerData } from "./types";
+import { bytes, clock, rate, short } from "./format";
 import { Icon } from "./icons";
+import { usePlaceNames } from "./names";
 import { SplitBar } from "./viz";
 
 /** What each property a stream's playlist carries is called (routes/plex.ts, streamNotes). */
@@ -128,12 +129,26 @@ export function Who({ id, name }: { id: string | null; name?: string | null }) {
   return <a href={`#people/${id}`}>{name ?? id}</a>;
 }
 
-/** A Discord server and channel, by ID: Discord does not share their names with an Activity. */
+/**
+ * A Discord server or channel by its name, its ID on hover; by ID where its
+ * name isn't known yet — it is once somebody opens the Activity there.
+ */
+export function PlaceName({ kind, id }: { kind: "guild" | "channel"; id: string | null | undefined }) {
+  const names = usePlaceNames();
+  if (!id) return <span className="muted">{kind === "guild" ? "Direct message" : "—"}</span>;
+  const name = kind === "guild" ? names.guild(id) : names.channel(id);
+  const what = kind === "guild" ? "Discord server" : "Discord channel";
+  return name
+    ? <span className="place-name" title={`${what} ID ${id}`}>{name}</span>
+    : <span className="mono" title={`${what} ID ${id}: its name is learned when somebody opens the Activity there`}>{short(id, 10)}</span>;
+}
+
+/** Where a session or a launch was: "Movie Night · Film Club", by name where known. */
 export function Where({ guildId, channelId }: { guildId: string | null; channelId: string | null }) {
   if (!guildId && !channelId) return <span className="muted">Unknown</span>;
   return (
-    <span className="mono where" title={`Server ${guildId ?? "?"} · channel ${channelId ?? "?"}`}>
-      {short(guildId ?? "?", 10)} · {short(channelId ?? "?", 10)}
+    <span className="where">
+      <PlaceName kind="channel" id={channelId} /> · <PlaceName kind="guild" id={guildId} />
     </span>
   );
 }
@@ -163,74 +178,6 @@ export function useLoad<T>(load: () => Promise<T>, deps: unknown[], onError: (e:
   return { data, busy, reload, setData };
 }
 
-// ─── A session's timeline, event by event ────────────────────────
+// ─── A session's timeline, event by event: events.ts ─────────────
 
-export type EventGroup = "playback" | "people" | "streams" | "problems" | "other";
-
-const GROUPS: Record<string, EventGroup> = {
-  play: "playback", pause: "playback", resume: "playback", seek: "playback", stop: "playback", ended: "playback",
-  joined: "people", "came back": "people", left: "people", "away from Discord": "people", "back in Discord": "people",
-  role: "people",
-  "stream started": "streams", "stream restarted": "streams", "stream ended": "streams", "stream changed": "streams",
-  subtitles: "streams", quality: "streams",
-  buffering: "problems", "loaded after seek": "problems", "player error": "problems", "room waited": "problems",
-};
-
-export const GROUP_LABELS: Record<EventGroup, string> = {
-  playback: "Playback", people: "Viewers", streams: "Streams and tracks", problems: "Buffering and errors", other: "Other",
-};
-
-export function groupOf(e: PlayEvent): EventGroup {
-  return GROUPS[e.kind] ?? "other";
-}
-
-const secs = (ms: unknown) => {
-  const n = Number(ms);
-  return Number.isFinite(n) ? (n < 10_000 ? `${(n / 1000).toFixed(1)} s` : clock(n / 1000)) : "an unknown time";
-};
-const sub = (v: unknown) => (Number(v) ? `track ${v}` : "off");
-const role = (v: unknown) => (v === "co-host" ? "co-host" : v === "host" ? "host" : "viewer");
-
-const END_REASONS: Record<string, string> = {
-  stopped: "playback was stopped", "another title": "the next title started", "room closed": "everyone left",
-  "server stopped": "the server shut down", "server restarted": "the server restarted unexpectedly",
-};
-
-/** One event of a session, as a sentence. */
-export function eventText(e: PlayEvent): string {
-  const who = e.username ?? e.userId ?? "A viewer";
-  const d = e.detail ?? {};
-  switch (e.kind) {
-    case "play": return `${who} started playback`;
-    case "pause": return `${who} paused playback`;
-    case "resume": return `${who} resumed playback`;
-    case "seek": return `${who} seeked from ${clock(Number(d.fromS))} to ${clock(Number(d.toS))}`;
-    case "stop": return `${who} stopped playback`;
-    case "ended": return `Session ended: ${END_REASONS[String(d.reason)] ?? d.reason ?? "no reason recorded"}${e.username ? ` (${e.username})` : ""}`;
-    case "joined": return `${who} joined as ${role(d.role)}`;
-    case "came back": return `${who} reconnected`;
-    case "left": return `${who} left`;
-    case "away from Discord": return `${who} switched away from Discord`;
-    case "back in Discord": return `${who} returned to Discord`;
-    case "role": return `${who} became ${role(d.to)}`;
-    case "stream changed": return `${who} switched to stream ${d.to ?? "?"} (audio track ${d.audioStreamId ?? "?"}, subtitles ${sub(d.subtitleStreamId)})`;
-    case "subtitles": return `${who} changed subtitles from ${sub(d.from)} to ${sub(d.to)}`;
-    case "quality": return `${who} changed quality from ${quality(Number(d.from))} to ${quality(Number(d.to))}`;
-    case "stream started": return `Stream started${e.username ? ` for ${e.username}` : ""}${d.summary ? `: ${d.summary}` : ""}`;
-    case "stream restarted": return d.replaced
-      ? `Stream ${d.variant ?? "?"} restarted under a new session${d.summary ? `: ${d.summary}` : ""}`
-      : `Stream ${d.variant ?? "?"} restarted at ${clock(Number(d.toOffsetS))} (previously ${clock(Number(d.fromOffsetS))})`;
-    case "stream ended": return `Stream ${d.variant ?? "?"} ended`;
-    case "room waited": return `Playback held for ${secs(d.ms)} until every viewer was ready`;
-    case "buffering": return `${who} buffered for ${secs(d.ms)}`;
-    case "loaded after seek": return `${who} loaded for ${secs(d.ms)} after a seek`;
-    case "player error": return `${who}: player error: ${d.msg ?? "unknown"}${d.tag ? ` (${d.tag})` : ""}`;
-    default: return `${e.kind}${e.username ? ` — ${e.username}` : ""}`;
-  }
-}
-
-export function eventTone(e: PlayEvent): string {
-  if (e.kind === "player error") return "bad";
-  if (e.kind === "buffering" || e.kind === "room waited") return "warn";
-  return "";
-}
+export { eventText, eventTone, GROUP_LABELS, groupOf, type EventContext, type EventGroup } from "./events";

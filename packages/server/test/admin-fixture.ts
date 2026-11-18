@@ -59,7 +59,8 @@ const fixtureTitles = {
   info: async (ratingKey: string) => {
     const f = FIXTURE_TITLES[ratingKey];
     return f ? { ratingKey, type: f[0], title: f[1], show: f[3], season: f[4], episode: f[5], year: f[0] === "movie" ? 1990 + (Number(ratingKey) % 30) : null,
-      durationS: f[2] * 60, poster: true } : null;
+      durationS: f[2] * 60, poster: true,
+      tracks: { 1: "English (AAC Stereo)", 2: "Japanese (AC3 5.1)", 3: "English (SRT)", 4: "English (SDH, PGS)" } } : null;
   },
   poster: async (ratingKey: string) => {
     const f = FIXTURE_TITLES[ratingKey];
@@ -74,6 +75,12 @@ const fixtureTitles = {
     return { type: "image/svg+xml", body: Buffer.from(svg) };
   },
 };
+// The names of its Discord servers and channels, as an Activity would have said them.
+for (const [id, name, guildId] of [["999000111", "Film Club", null], ["888000111", "Movie Night", "999000111"],
+  ["777000222", "Late Shows", null], ["666000222", "Main Hall", "777000222"], ["555000333", "Study Group", null],
+  ["444000333", "Lounge", "555000333"]] as Array<[string, string, string | null]>) {
+  recorder.place({ at: Date.now(), kind: guildId ? "channel" : "guild", id, name, guildId });
+}
 const server = http.createServer(createAdminApp({ password, recorder, titles: fixtureTitles,
   // What Seerr would say of each request now: one available, one declined, the rest pending.
   requestState: async (_type, tmdbId) => (tmdbId === 129 ? { mediaStatus: 5, requestStatus: 2 } : tmdbId === 95396 ? { mediaStatus: 1, requestStatus: 3 } : { mediaStatus: 2, requestStatus: 1 }) }));
@@ -148,9 +155,13 @@ const feed = () => {
     const mb = sampled * (3 + i);
     recorder.clientLog({ at: Date.now(), userId, clientId: `fixture${i}`, entries: [{
       t: Date.now(), level: "LOG", tag: "Health", msg: "sample",
-      data: { session: "fixture", httpMB: mb, p2pMB: i % 2 ? mb / 3 : 0, edgeHitMB: (mb * 0.4).toFixed(1), edgeMB: (mb * 0.9).toFixed(1) },
+      data: { session: "fixture", httpMB: mb, p2pMB: i % 2 ? mb / 3 : 0, edgeHitMB: (mb * 0.4).toFixed(1), edgeMB: (mb * 0.9).toFixed(1),
+        // Where each player is: the episode playing from 312 s, the film paused at 4210 s.
+        ...(i < 4 ? { posS: 312 + sampled * 10, paused: false, playedS: 10 } : { posS: 4210, paused: true, playedS: 0 }) },
     }] });
   });
+  // What the bot's port sent in those ten seconds: about the two streams' worth.
+  recorder.sent({ at: Date.now(), bytes: 11_500_000 + (sampled % 3) * 1_000_000 });
   if (sampled === 3) {
     const t = Date.now();
     recorder.clientLog({ at: t, userId: "402115789012345680", clientId: "fixture3", entries: [

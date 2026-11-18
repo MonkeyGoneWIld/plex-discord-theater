@@ -1,13 +1,14 @@
 import { useState } from "react";
 import { api } from "./api";
 import type { PlayEvent, PlaySummary } from "./types";
-import { bytes, clock, dateTime, timeOfDay } from "./format";
+import { bytes, clock, dateTime, short, timeOfDay } from "./format";
 import {
-  BufferingCell, bufferingTone, DataCell, Downloads, eventText, eventTone, GROUP_LABELS, groupOf, useLoad, Where, Who,
+  BufferingCell, bufferingTone, DataCell, Downloads, eventText, eventTone, GROUP_LABELS, groupOf, PlaceName, useLoad, Where, Who,
   type EventGroup,
 } from "./parts";
 import { StreamCard } from "./streams";
-import { KeyMoments, SessionChart } from "./timeline";
+import { KeyMoments, SessionChart, Watched } from "./timeline";
+import { newestFirst, type EventContext } from "./events";
 import { MiniChart } from "./lazy";
 import { Icon } from "./icons";
 import { Poster, titleLine, useTitles } from "./titles";
@@ -139,6 +140,8 @@ function PlayPage({ id, onError }: { id: number; onError: (e: unknown) => void }
   const errors = viewers.reduce((s, v) => s + v.errors, 0);
   const health = bufferingTone({ stalls, stalledMs, errors });
   const transcoded = streams.filter((s) => s.decision === "transcode").length;
+  // Tracks and streams by name in what the page says of them.
+  const ctx: EventContext = { tracks: i?.tracks ?? null, streams };
   return (
     <>
       <div className="crumbs"><a href="#history"><Icon name="back" size={14} /> History</a></div>
@@ -156,10 +159,10 @@ function PlayPage({ id, onError }: { id: number; onError: (e: unknown) => void }
             <div className="facts">
               <span className="fact"><Icon name="users" size={14} />Host <strong><Who id={play.hostUserId} name={play.hostName} /></strong></span>
               <span className="fact"><Icon name="clock" size={14} />{dateTime(play.startedAt)}{play.endedAt ? ` → ${timeOfDay(play.endedAt)}` : ""}</span>
-              <span className="fact" title="Discord server ID"><Icon name="places" size={14} />Server <span className="mono">{play.guildId ?? "—"}</span></span>
-              <span className="fact" title="Discord channel ID">Channel <span className="mono">{play.channelId ?? "—"}</span></span>
+              <span className="fact"><Icon name="places" size={14} />Server <strong><PlaceName kind="guild" id={play.guildId} /></strong></span>
+              <span className="fact">Channel <strong><PlaceName kind="channel" id={play.channelId} /></strong></span>
+              <span className="fact" title={`The Activity's room in Discord: instance ${play.roomId}`}>Room <span className="mono">{short(play.roomId, 14)}</span></span>
               <span className="fact">Plex item <span className="mono">{play.ratingKey}</span></span>
-              <span className="fact">Room <span className="mono">{play.roomId}</span></span>
               {play.endedAt === null && <button className="link" onClick={reload}>Refresh</button>}
             </div>
             <div className="session-kpis">
@@ -223,7 +226,7 @@ function PlayPage({ id, onError }: { id: number; onError: (e: unknown) => void }
                 n: n + 1, started: true, decision: s.decision, reason: s.reason, notes: s.notes, kbps: s.kbps, engine: s.engine,
                 quality: s.quality, variantKey: s.variantKey, hlsSessionId: s.hlsSessionId, audioStreamId: s.audioStreamId,
                 subtitleStreamId: s.subtitleStreamId, ownerName: nameOf(s.ownerUserId), ownerUserId: s.ownerUserId, offsetS: s.offsetS,
-                startedAt: s.startedAt, endedAt: s.endedAt, peakViewers: s.peakViewers,
+                startedAt: s.startedAt, endedAt: s.endedAt, peakViewers: s.peakViewers, tracks: i?.tracks ?? null,
               }} />
             ))}
         </div>
@@ -232,32 +235,40 @@ function PlayPage({ id, onError }: { id: number; onError: (e: unknown) => void }
       <section className="card">
         <div className="panel-head">
           <h3>Session overview</h3>
-          <span className="muted small">Playback, each stream and each viewer over time. Hover any bar or mark for details.</span>
+          <span className="muted small">Playback, where in the title it was, each stream and each viewer over time. Hover any bar, line or mark for details.</span>
         </div>
-        <SessionChart data={data} />
+        <SessionChart data={data} durationS={i?.durationS ?? null} ctx={ctx} />
+      </section>
+
+      <section className="card">
+        <div className="panel-head">
+          <h3>What was watched</h3>
+          <span className="muted small">The parts of the title each viewer saw, and where they buffered or hit an error.</span>
+        </div>
+        <Watched data={data} durationS={i?.durationS ?? null} />
       </section>
 
       <section className="card">
         <div className="panel-head">
           <h3>Key moments</h3>
-          <span className="muted small">What changed during the session, and why.</span>
+          <span className="muted small">What changed during the session, and why. Newest first.</span>
         </div>
-        <KeyMoments data={data} />
+        <KeyMoments data={data} ctx={ctx} />
       </section>
 
-      <Timeline events={events} />
+      <Timeline events={events} ctx={ctx} />
     </>
   );
 }
 
 const ALL_GROUPS: EventGroup[] = ["playback", "people", "streams", "problems", "other"];
 
-function Timeline({ events }: { events: PlayEvent[] }) {
+function Timeline({ events, ctx }: { events: PlayEvent[]; ctx: EventContext }) {
   const [shown, setShown] = useState<Set<EventGroup>>(() => new Set(ALL_GROUPS));
   const [open, setOpen] = useState<number | null>(null);
   const counts = new Map<EventGroup, number>();
   for (const e of events) counts.set(groupOf(e), (counts.get(groupOf(e)) ?? 0) + 1);
-  const list = events.filter((e) => shown.has(groupOf(e)));
+  const list = newestFirst(events.filter((e) => shown.has(groupOf(e))));
   const toggle = (g: EventGroup) => {
     const next = new Set(shown);
     if (next.has(g)) next.delete(g); else next.add(g);
@@ -266,7 +277,7 @@ function Timeline({ events }: { events: PlayEvent[] }) {
   return (
     <section className="card">
       <div className="panel-head">
-        <h3>All events <span className="muted">({events.length})</span></h3>
+        <h3>All events <span className="muted">({events.length}, newest first)</span></h3>
         <div className="chips" role="group" aria-label="Filter events">
           {ALL_GROUPS.filter((g) => counts.get(g)).map((g) => (
             <button key={g} className={`chip g-${g} ${shown.has(g) ? "on" : ""}`} aria-pressed={shown.has(g)} onClick={() => toggle(g)}>
@@ -283,7 +294,7 @@ function Timeline({ events }: { events: PlayEvent[] }) {
                 <span className={`marker g-${groupOf(e)} ${eventTone(e)}`} />
                 <span className="event-time mono">{timeOfDay(e.at)}</span>
                 <span className="event-pos mono">{e.posS === null ? "" : clock(e.posS)}</span>
-                <span className="event-text">{eventText(e)}</span>
+                <span className="event-text">{eventText(e, ctx)}</span>
               </button>
               {open === e.id && (
                 <dl className="grid event-detail">

@@ -1,6 +1,6 @@
 import type {
   CachesResult, LogFile, LogResult, Overview, PersonDetail, PersonSummary, PlaceGuild, PlayDetail, PlaySummary,
-  SettingsView, TitleInfo, TitleRequest, UsageRow, Graphs, HistorySummary, TrimCounts
+  SettingsView, TitleInfo, TitleRequest, UsageRow, Graphs, HistorySummary, TrimCounts, PlaceNames
 } from "./types";
 import { timeZone } from "./format";
 
@@ -11,6 +11,9 @@ function qs(q: Record<string, string | number | undefined | null>): string {
   const s = p.toString();
   return s ? `?${s}` : "";
 }
+
+/** A period of the statistics: the last so many days (0: all time) or hours, or from one instant to another. */
+export type GraphPeriod = { days: number } | { hours: number } | { from: number; to: number };
 
 /** Signed out: the page goes back to its sign-in. */
 export class SignedOut extends Error {}
@@ -49,7 +52,8 @@ export const api = {
   requests: (q: { q?: string; before?: number; limit?: number }) => call<{ requests: TitleRequest[] }>(`/api/requests${qs(q)}`),
   caches: () => call<CachesResult>("/api/caches"),
   /** By the day, hour and weekday of this browser's time zone. */
-  graphs: (days: number) => call<Graphs>(`/api/graphs${qs({ days, tz: timeZone() })}`),
+  graphs: (p: GraphPeriod) => call<Graphs>(`/api/graphs${qs({ ...p, tz: timeZone() })}`),
+  names: () => call<PlaceNames>("/api/names"),
   historyFile: (days?: number) => call<{ summary: HistorySummary; trim: TrimCounts | null }>(`/api/history-file${qs({ days })}`),
   trim: (days: number) => call<TrimCounts & { bytesBefore: number; bytesAfter: number }>("/api/history-file/trim", {
     method: "POST",

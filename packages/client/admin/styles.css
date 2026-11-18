@@ -357,7 +357,7 @@ button.danger { background: var(--bad); color: #fff; }
 
 .session { padding: 0; overflow: hidden; }
 .session.playing { box-shadow: inset 3px 0 0 var(--good); }
-.session.buffering { box-shadow: inset 3px 0 0 var(--warn); }
+.session.waiting { box-shadow: inset 3px 0 0 var(--warn); }
 .session.paused { box-shadow: inset 3px 0 0 var(--muted); }
 .session-top { display: grid; grid-template-columns: auto minmax(0, 1fr) minmax(300px, 420px); gap: 20px; padding: 20px; }
 .session-main { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
@@ -370,7 +370,7 @@ button.danger { background: var(--bad); color: #fff; }
 .progress-track { height: 8px; border-radius: 999px; background: var(--surface-3); overflow: hidden; }
 .progress-track span { display: block; height: 100%; border-radius: 999px; background: var(--good); transition: width 1s linear; }
 .progress.paused .progress-track span { background: var(--muted); }
-.progress.buffering .progress-track span { background: var(--warn); }
+.progress.waiting .progress-track span { background: var(--warn); }
 .progress-times { display: flex; justify-content: space-between; gap: 12px; margin-top: 6px; font-size: 13px; font-variant-numeric: tabular-nums; }
 
 .facts { display: flex; flex-wrap: wrap; gap: 6px 8px; }
@@ -496,7 +496,8 @@ a.fact, .fact a { color: var(--accent); }
   .play-row > :nth-child(3), .play-row > :nth-child(5) { display: none; }
 }
 @media (max-width: 900px) {
-  .shell { grid-template-columns: minmax(0, 1fr); }
+  /* The bar on top keeps its height while a page below it is still loading. */
+  .shell { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; align-content: start; }
   .sidebar {
     z-index: 5; height: auto; flex-direction: row; align-items: center; gap: 8px; padding: 8px 12px;
     border-right: 0; border-bottom: 1px solid var(--border); overflow-x: auto; scrollbar-width: none;
@@ -584,12 +585,37 @@ a.fact, .fact a { color: var(--accent); }
 }
 .lane-mark.info { background: var(--info); }
 .lane-mark.bad { background: var(--bad); }
+.lane-mark.warn { background: var(--warn); }
+/* A player error: a red diamond, wherever it is drawn; buffering is the red bar or dot. */
+.lane-mark.error {
+  top: 50%; bottom: auto; width: 9px; height: 9px; margin: -4.5px 0 0 -4.5px; border-radius: 2px; transform: rotate(45deg);
+  background: var(--bad);
+}
+/* Where in the title a session was, along its clock; and what of it each viewer saw. */
+.lane-position .lane-track { height: 64px; }
+.position-track { cursor: crosshair; }
+.position-track svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; overflow: visible; }
+.position-line { fill: none; stroke: var(--accent); stroke-width: 2; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
+.position-grid { stroke: var(--border); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.position-mark {
+  position: absolute; width: 9px; height: 9px; border-radius: 50%; transform: translate(-50%, -50%); z-index: 2;
+  background: var(--bad); box-shadow: 0 0 0 2px var(--surface);
+}
+.position-tip {
+  position: absolute; bottom: calc(100% + 4px); transform: translateX(-50%); z-index: 3; pointer-events: none; white-space: nowrap;
+  padding: 3px 8px; border-radius: 6px; background: var(--surface-3); border: 1px solid var(--border); font-size: 12px; font-family: var(--mono);
+}
+.position-tip.left { transform: translateX(-100%); }
+.position-mark.error { border-radius: 2px; transform: translate(-50%, -50%) rotate(45deg); }
+.lane-seg.watched { background: var(--accent); top: 5px; bottom: 5px; padding: 0; }
+.watched-chart { margin-top: 10px; }
 .lane-axis .lane-track { height: 16px; background: none; }
 .lane-axis .lane-track span { position: absolute; top: 0; transform: translateX(-50%); font-size: 11px; color: var(--muted); font-family: var(--mono); }
 .lane-axis .lane-track span.start { transform: none; }
 .lane-axis .lane-track span.end { transform: translateX(-100%); }
 .chart-key { margin-top: 6px; }
 .swatch.mark { width: 3px; height: 12px; border-radius: 2px; background: var(--accent); }
+.swatch.error-key { width: 8px; height: 8px; margin-left: 1px; margin-right: 7px; border-radius: 2px; background: var(--bad); transform: rotate(45deg); }
 
 .moments { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 .moment { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 12px; align-items: start; padding: 10px 12px; border-radius: 10px; background: var(--surface-2); border-left: 3px solid var(--muted); }
@@ -631,3 +657,13 @@ a.fact, .fact a { color: var(--accent); }
   .config-group summary .muted { display: none; }
   .table.config td:first-child { white-space: normal; overflow-wrap: anywhere; }
 }
+/* Statistics: a period of one's own, and the server's upload. */
+.custom-period { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
+.custom-period input.short { width: 96px; }
+.custom-period label { display: inline-flex; gap: 6px; align-items: center; }
+.bad-text { color: var(--bad); }
+.period-shown { margin: 8px 0 0; }
+.upload-card { margin-top: 16px; }
+.upload-card .tiles { margin-top: 12px; }
+.upload-card h4 { margin: 18px 0 8px; }
+.upload-card .note { margin-top: 12px; }

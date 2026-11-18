@@ -169,8 +169,11 @@ const video = (msg: string, at: number, o: Any = {}) => ({ t: at, level: msg.sta
 // A batch's lines are from the seconds before it came.
 const b = t - 12_000;
 rec.clientLog({ at: t, userId: "222", clientId: "pageA", entries: [
-  video("waiting (buffer starved)", b),
-  video("playing", b + 1_500),
+  // Playing since they joined, six and a half seconds before: what follows
+  // is a stall, not the start loading.
+  video("playing", b - 5_000),
+  video("waiting (buffer starved)", b + 500),
+  video("playing", b + 2_000),
   video("waiting (buffer starved)", b + 5_000, { seeking: true }),
   video("playing", b + 5_800),
   video("waiting (buffer starved)", b + 7_000, { paused: true }),
@@ -546,6 +549,207 @@ check("a copy of the whole history file, as it is: it opens, with every play",
   [snap.subarray(0, 15).toString("latin1"), (sdb.prepare("SELECT COUNT(*) AS n FROM plays").get() as Any).n], ["SQLite format 3", 4]);
 sdb.close();
 gr.close();
+
+console.log("\n— loading the start, buffering, a seek; the host changing the audio; where in the title —");
+{
+  // 17 November: everybody joining was "buffering" while their player loaded
+  // the start, on Now Playing and in the history; "switched" to the stream
+  // they started on; and moved with the host's change of audio with nothing
+  // to say it was the host's.
+  let n = 1_900_000_000_000;
+  const G = "123456789012345678";
+  const C = "223456789012345678";
+  const nInst = new Map<string, Inst>([["RN", { hostUserId: "711", guildId: G, channelId: C, createdAt: n }]]);
+  const rn: Any = { ...structuredClone(R1), id: "RN", ratingKey: "90001", title: "Verity", playing: true, positionS: 0, waiting: false,
+    hostVariantKey: "1:0", discord: { guildId: G, channelId: C, hostUserId: "711", startedAt: n },
+    clients: [client("711", "hostess", { role: "host", variantKey: "1:0" })],
+    streams: [stream("1:0", "SN1", { viewers: ["711"], kbps: 8000 })] };
+  const nPath = path.join(process.env.THUMB_CACHE_DIR!, "now.sqlite");
+  const nr = new Recorder({ dbPath: nPath, now: () => n, instances: () => nInst,
+    source: () => ({ at: n, totals: {}, rooms: [rn] }) as unknown as Overview });
+  const nStep = (ms: number) => { n += ms; if (rn.playing) rn.positionS = (rn.positionS as number) + ms / 1000; nr.tick(n); };
+  const vid = (msg: string, at: number, o: Any = {}) => ({ t: at, level: msg.startsWith("waiting") ? "WARN" : "LOG", tag: "Video", msg,
+    data: { posS: rn.positionS, paused: false, seeking: false, readyState: 3, ...o } });
+  const say = (userId: string, ...entries: Any[]) => nr.clientLog({ at: n, userId, clientId: `page${userId}`,
+    entries: entries as unknown as Parameters<typeof nr.clientLog>[0]["entries"] });
+  const liveOf = (userId: string) => nr.annotate({ at: n, totals: {}, rooms: [structuredClone(rn)] } as unknown as Overview)
+    .rooms[0].clients.find((c) => c.userId === userId)?.player;
+  const evs = () => nr.play(pid)!.events;
+  nr.transport({ at: n, roomId: "RN", type: "play", userId: "711", username: "hostess", role: "host", fromS: 0, toS: 0,
+    ratingKey: "90001", title: "Verity" });
+  nr.tick(n);
+  const pid = nr.history()[0].id;
+  for (let i = 0; i < 10; i++) nStep(2_000);
+
+  // A viewer joins: their page has no stream yet, then the one with their own subtitles.
+  (rn.clients as Any[]).push(client("722", "latecomer", { variantKey: null, subtitleStreamId: 0 }));
+  nStep(2_000);
+  const joinedAt = n;
+  (rn.clients as Any[])[1] = client("722", "latecomer", { variantKey: "1:3", subtitleStreamId: 3 });
+  (rn.streams as Any[]).push(stream("1:3", "SN2", { viewers: ["722"], subtitleStreamId: 3, ownerUserId: "722" }));
+  nStep(2_000);
+  check("somebody joining starts on a stream: not a switch from one, nor a change of subtitles",
+    evs().filter((e) => e.userId === "722" && ["joined", "stream changed", "subtitles"].includes(e.kind))
+      .map((e) => [e.kind, (e.detail as Any | null)?.from ?? null]),
+    [["joined", null], ["stream changed", null]]);
+
+  say("722", vid("waiting (buffer starved)", n - 1_500, { readyState: 0 }));
+  check("  their player loading the start is that on Now Playing, not buffering", liveOf("722"), { stall: "start", sinceMs: 1_500 });
+  nStep(2_000);
+  say("722", vid("playing", n - 500));
+  check("  and playing, nothing", liveOf("722"), { stall: null, sinceMs: null });
+  for (let i = 0; i < 10; i++) nStep(2_000);
+  say("722", vid("waiting (buffer starved)", n - 2_000));
+  check("  a stall well after: buffering, and for how long so far", liveOf("722"), { stall: "buffering", sinceMs: 2_000 });
+  nStep(2_000);
+  say("722", vid("playing", n - 1_000));
+  nr.transport({ at: n, roomId: "RN", type: "seek", userId: "711", username: "hostess", role: "host", fromS: rn.positionS as number,
+    toS: 1_200, ratingKey: "90001", title: "Verity" });
+  rn.positionS = 1_200;
+  say("722", vid("waiting (buffer starved)", n + 1_000, { posS: 1_200 }));
+  nStep(2_000);
+  check("  one just after the host's seek, though their player didn't say it seeked: loading after a seek", liveOf("722")?.stall, "seek");
+  say("722", vid("playing", n + 500, { posS: 1_200 }));
+  nStep(2_000);
+  const v722 = nr.play(pid)!.viewers.find((v) => v.userId === "722")!;
+  check("  only the stall is counted as buffering", [v722.stalls, v722.stalledMs], [1, 3_000]);
+  check("  and each is in the history as what it was",
+    evs().filter((e) => ["loaded at start", "buffering", "loaded after seek"].includes(e.kind)).map((e) => [e.kind, e.username, (e.detail as Any).ms]),
+    [["loaded at start", "latecomer", 3_000], ["buffering", "latecomer", 3_000], ["loaded after seek", "latecomer", 1_500]]);
+  check("  a player not heard from in a while: not said", (() => { const at = n; n += 31_000; const p = liveOf("722"); n = at; return p; })(), null);
+
+  // Somebody on the host's stream; then the host changes the audio.
+  (rn.clients as Any[]).push(client("733", "sidekick", { variantKey: "1:0" }));
+  (rn.streams as Any[])[0] = stream("1:0", "SN1", { viewers: ["711", "733"], kbps: 8000 });
+  nStep(2_000);
+  Object.assign(rn, { waiting: true, waitingWhy: "the host's stream is being rebuilt", switching: "audio" });
+  (rn.clients as Any[])[0] = client("711", "hostess", { role: "host", variantKey: "2:0" });
+  (rn.streams as Any[])[0] = stream("2:0", "SN3", { viewers: ["711"], audioStreamId: 2, kbps: 8000 });
+  nStep(2_000);
+  (rn.clients as Any[])[2] = client("733", "sidekick", { variantKey: "2:0" });
+  (rn.streams as Any[])[0] = stream("2:0", "SN3", { viewers: ["711", "733"], audioStreamId: 2, kbps: 8000 });
+  nStep(2_000);
+  Object.assign(rn, { waiting: false, waitingWhy: null, switching: null });
+  nStep(2_000);
+  check("the host changing the audio: their own change, and who moved with them, and why",
+    evs().filter((e) => e.kind === "stream changed" && (e.detail as Any).to === "2:0")
+      .map((e) => [e.username, (e.detail as Any).from, (e.detail as Any).host ?? null, (e.detail as Any).why ?? null]),
+    [["hostess", "1:0", null, "audio"], ["sidekick", "1:0", "hostess", "audio"]]);
+  check("  the room waiting for the host's picture: how long, why, and the change behind it",
+    evs().filter((e) => e.kind === "room waited").map((e) => e.detail), [{ ms: 4_000, why: "the host's stream is being rebuilt", switching: "audio" }]);
+
+  // Where in the title: the room's track, and a viewer's own from their player.
+  const hs = (posS: number, at: number) => ({ t: at, level: "LOG", tag: "Health", msg: "sample",
+    data: { session: "SN2", httpMB: 0, p2pMB: 0, posS, paused: false, playedS: 10 } });
+  say("722", hs(1_300, n - 20_000), hs(1_310, n - 10_000), hs(1_320, n));
+  const where = nr.play(pid)!;
+  check("where in the title it played: the room's track; each viewer's from their own player, or the room's while they were there",
+    [where.track.length > 4, where.track.some((p) => p[1] === 1_200), where.watched["722"], where.watched["711"].map(([a]) => a)],
+    [true, true, [[1_300, 1_320]], [0, 1_200]]);
+
+  // Names: a server's from the sign-in that saw it; a channel's from the
+  // Activity running in it, and no other.
+  nr.place({ at: n, kind: "guild", id: G, name: "  Film\nClub  " });
+  nr.place({ at: n, kind: "guild", id: "not-an-id", name: "Nope" });
+  nr.place({ at: n, kind: "guild", id: "323456789012345678", name: "   " });
+  say("722", { t: n, level: "LOG", tag: "Discord", msg: "channel", data: { channelId: C, guildId: G, name: "Movie Night" } },
+    { t: n, level: "LOG", tag: "Discord", msg: "channel", data: { channelId: "423456789012345678", guildId: G, name: "Elsewhere" } });
+  check("the names of servers and channels: cleaned; nothing for a bad ID, an empty name, or a channel no Activity runs in",
+    nr.placeNames(), { guilds: { [G]: "Film Club" }, channels: { [C]: "Movie Night" } });
+  nr.close();
+
+  // The same history as the recorder before wrote it: the start load was
+  // buffering, and counted; a viewer at a new episode had switched from the
+  // stream of the one before, and changed subtitles with it.
+  const old = new Database(nPath);
+  const add = old.prepare("INSERT INTO events (play_id, room_id, at, kind, user_id, username, pos_s, detail) VALUES (?, 'RN', ?, ?, ?, ?, 0, ?)");
+  add.run(pid, joinedAt + 3_000, "buffering", "722", "latecomer", JSON.stringify({ ms: 2_500 }));
+  old.prepare("UPDATE play_viewers SET stalls = stalls + 1, stalled_ms = stalled_ms + 2500 WHERE play_id = ? AND user_id = '722'").run(pid);
+  add.run(pid, joinedAt + 40_000, "stream changed", "733", "sidekick", JSON.stringify({ from: "9:9", to: "1:0" }));
+  add.run(pid, joinedAt + 40_000, "subtitles", "733", "sidekick", JSON.stringify({ from: 4, to: 0 }));
+  add.run(pid, joinedAt + 2_000, "subtitles", "722", "latecomer", JSON.stringify({ from: 0, to: 3 }));
+  old.pragma("user_version = 1");
+  old.close();
+  const mended = new Recorder({ dbPath: nPath, now: () => n, instances: () => new Map(),
+    source: () => ({ at: n, totals: {}, rooms: [] }) as unknown as Overview });
+  const m = mended.play(pid)!;
+  check("history from before, put right on the update: the start load isn't buffering, nor counted",
+    [m.events.filter((e) => e.kind === "buffering").length, m.events.filter((e) => e.kind === "loaded at start").length,
+      m.viewers.find((v) => v.userId === "722")!.stalls, m.viewers.find((v) => v.userId === "722")!.stalledMs], [1, 2, 1, 3_000]);
+  check("  a stream of the title before is nobody's switch, and the subtitles that came with it no change",
+    [m.events.filter((e) => e.userId === "733" && e.kind === "stream changed").map((e) => (e.detail as Any).from),
+      m.events.filter((e) => e.kind === "subtitles").length], [["1:0", null], 0]);
+  mended.close();
+  const again = new Database(nPath, { readonly: true });
+  check("  once: the history file says it was", again.pragma("user_version", { simple: true }), 2);
+  again.close();
+}
+
+console.log("\n— what the bot's port sent, for the qBittorrent manager —");
+{
+  // Six minutes of one stream at 8 Mbps: four with one viewer, the bot
+  // sending 10 Mbps, then two with two, sending 15.
+  const M0 = 1_950_000_000_000 - (1_950_000_000_000 % 60_000);
+  let u = M0;
+  const ur: Any = { ...structuredClone(R1), id: "RU", ratingKey: "90002", title: "Upload", playing: true, positionS: 0, waiting: false,
+    discord: { guildId: "G6", channelId: "C6", hostUserId: "811", startedAt: u },
+    clients: [client("811", "one", { role: "host" })], streams: [stream("v0", "SU1", { viewers: ["811"], kbps: 8000 })] };
+  const up = new Recorder({ dbPath: path.join(process.env.THUMB_CACHE_DIR!, "upload.sqlite"), now: () => u, instances: () => new Map(),
+    source: () => ({ at: u, totals: {}, rooms: [ur] }) as unknown as Overview });
+  up.transport({ at: u, roomId: "RU", type: "play", userId: "811", username: "one", role: "host", fromS: 0, toS: 0, ratingKey: "90002", title: "Upload" });
+  for (let i = 0; i < 36; i++) {
+    u = M0 + i * 10_000;
+    if (i === 24) {
+      (ur.clients as Any[]).push(client("822", "two"));
+      (ur.streams as Any[])[0] = stream("v0", "SU1", { viewers: ["811", "822"], kbps: 8000 });
+    }
+    up.tick(u);
+    up.sent({ at: u, bytes: i < 24 ? 12_500_000 : 18_750_000 });
+  }
+  up.sent({ at: u, bytes: 0 });
+  const hour = up.graphs({ hours: 1 }, u + 1_000).upload;
+  check("all it sent, on average while playing, at the 95th percentile, at its busiest and when",
+    [hour.sentBytes, hour.avgKbps, hour.p95Kbps, hour.peakKbps, hour.peakAt, hour.minutes, hour.allMinutes, hour.since],
+    [4 * 75e6 + 2 * 112.5e6, 11_667, 15_000, 15_000, M0 + 4 * 60_000, 6, 6, M0]);
+  check("  by how many watched: what it sent over the stream's bitrate, over whole minutes of it",
+    hour.byViewers.map((b) => [b.viewers, b.minutes, b.avgKbps, b.perStream, b.perStreamMinutes]),
+    [[1, 4, 10_000, 1.25, 3], [2, 2, 15_000, 1.88, 1], [3, 0, null, null, 0], [4, 0, null, null, 0]]);
+  const g2 = up.graphs({ from: M0 + 60_000, to: M0 + 3 * 60_000 }, u + 1_000);
+  check("a period of its own, from one time to another: by the hour, just what was sent in it",
+    [g2.bucket, g2.lastHours, g2.from, g2.to, g2.upload.sentBytes, g2.totals.sentBytes], ["hour", null, M0 + 60_000, M0 + 3 * 60_000, 150e6, 150e6]);
+  const last = up.graphs({ hours: 6 }, u + 1_000);
+  check("  the last so many hours; by the hour up to three days, by the day after",
+    [last.lastHours, last.bucket, last.to - last.from, up.graphs({ hours: 72 }, u).bucket, up.graphs({ hours: 73 }, u).bucket,
+      up.graphs({ days: 3 }, u).bucket, up.graphs({ days: 7 }, u).bucket, last.daily.reduce((s, d) => s + d.sentBytes, 0), Math.max(...last.daily.map((d) => d.peakKbps))],
+    [6, "hour", 6 * 3_600_000, "hour", "day", "hour", "day", 525e6, 15_000]);
+  up.trim(M0 + 3 * 60_000);
+  check("removing old history removes what was sent then too", up.graphs({ hours: 1 }, u + 1_000).upload.sentBytes, 75e6 + 2 * 112.5e6);
+  up.close();
+}
+{
+  // The bot's port: what each socket wrote since the last count, and those
+  // that closed in between.
+  const { meterUpload } = await import("../src/services/upload-meter.js");
+  const { EventEmitter } = await import("node:events");
+  const said: Any[] = [];
+  setAdminHooks({ sent: (e) => said.push(e as unknown as Any) });
+  const port = new EventEmitter();
+  const sock = () => Object.assign(new EventEmitter(), { bytesWritten: 0 });
+  const stop = meterUpload(port as never, 3_600_000, () => 42);
+  const a = sock();
+  const b = sock();
+  port.emit("connection", a);
+  port.emit("connection", b);
+  a.bytesWritten = 1_000;
+  b.bytesWritten = 500;
+  b.emit("close");
+  stop();
+  a.bytesWritten = 1_600;
+  const stop2 = meterUpload(port as never, 3_600_000, () => 43);
+  stop2();
+  check("the bot's port: what its sockets wrote, those closed since too, said once", said, [{ at: 42, bytes: 1_500 }]);
+  setAdminHooks(null);
+}
 
 // ─── What reaches it ─────────────────────────────────────────────
 const express = (await import("express")).default;

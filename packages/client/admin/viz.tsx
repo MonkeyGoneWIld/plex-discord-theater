@@ -59,7 +59,7 @@ export function SplitBar({ server, cache, peers, legend = true, fmt = bytes }: {
 }
 
 /** Playback progress: where it is, how long it runs, and what is left. */
-export function Progress({ positionS, durationS, state }: { positionS: number; durationS: number | null; state: "playing" | "paused" | "buffering" | "idle" }) {
+export function Progress({ positionS, durationS, state }: { positionS: number; durationS: number | null; state: "playing" | "paused" | "waiting" | "idle" }) {
   const share = durationS && durationS > 0 ? Math.min(100, (positionS / durationS) * 100) : null;
   const left = durationS && durationS > positionS ? durationS - positionS : null;
   return (

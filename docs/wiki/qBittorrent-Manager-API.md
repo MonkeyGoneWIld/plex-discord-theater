@@ -80,6 +80,24 @@ factor of 0.1, or `20×3×0.8 + 20×2×0.8 + 20 = 100 Mbps` with only
 `THEATER_BANDWIDTH_FACTOR` at 0.8. The manager adds other remote Plex sessions,
 then applies its global `BANDWIDTH_MULTIPLIER`.
 
+### Setting it from your own figures
+
+The [dashboard](Dashboard#statistics)'s Statistics page shows what the
+server actually sent, under **Server upload**:
+
+- **Sent ÷ bitrate**, by how many were watching: what the server sent over
+  the bitrate of the one stream playing, over whole minutes of it. With one
+  viewer it is about 1. With more, it is what
+  `THEATER_SHARED_BASE` × (1 + `THEATER_EXTRA_VIEWER_FACTOR` × (viewers − 1))
+  should come to. For example, 1.2 with two viewers and 1.3 with three is a
+  base of 1.1 and a factor of 0.1.
+- The **95th percentile** and the **busiest minute**, in MiB/s: what to
+  compare `MIN_UPLOAD_MIB` and `MAX_UPLOAD_MIB` with.
+
+Give the figures a few evenings of watching first.
+
+### Matching Plex's sessions
+
 The manager matches each stream to its Plex session and replaces that row in
 its calculation, so the server's streams aren't counted twice and other streams
 on the same Plex account are still counted. No Plex user setting is needed.

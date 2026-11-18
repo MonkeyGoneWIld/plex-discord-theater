@@ -2,7 +2,7 @@ import { useState } from "react";
 import { api } from "./api";
 import type { PersonSummary } from "./types";
 import { clock, dateTime } from "./format";
-import { BufferingCell, DataCell, Downloads, useLoad, Where } from "./parts";
+import { BufferingCell, DataCell, Downloads, PlaceName, useLoad, Where } from "./parts";
 import { MiniChart } from "./lazy";
 import { RequestRows } from "./Requests";
 
@@ -116,12 +116,12 @@ function PersonPage({ id, onError }: { id: string; onError: (e: unknown) => void
         {places.length === 0 ? <p className="muted">No server activity recorded.</p> : (
           <div className="table-wrap">
             <table className="table">
-              <thead><tr><th>Server ID</th><th>Channel ID</th><th>Launches</th><th>Joins</th><th>First active</th><th>Last active</th></tr></thead>
+              <thead><tr><th>Server</th><th>Channel</th><th>Launches</th><th>Joins</th><th>First active</th><th>Last active</th></tr></thead>
               <tbody>
                 {places.map((pl) => (
                   <tr key={`${pl.guildId}/${pl.channelId}`}>
-                    <td className="mono">{pl.guildId ?? "—"}</td>
-                    <td className="mono">{pl.channelId ?? "—"}</td>
+                    <td><PlaceName kind="guild" id={pl.guildId} /></td>
+                    <td><PlaceName kind="channel" id={pl.channelId} /></td>
                     <td>{pl.launches || "—"}</td>
                     <td>{pl.joins || "—"}</td>
                     <td className="nowrap">{dateTime(pl.first)}</td>

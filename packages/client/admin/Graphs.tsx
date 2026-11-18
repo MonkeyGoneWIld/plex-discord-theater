@@ -1,33 +1,45 @@
 import { useState } from "react";
-import { api } from "./api";
+import { api, type GraphPeriod } from "./api";
 import type { GraphDay, Graphs as GraphData } from "./types";
-import { bytes, clock, zoneLabel } from "./format";
+import { bytes, clock, dateTime, zoneLabel } from "./format";
 import { useLoad } from "./parts";
+import { usePlaceNames } from "./names";
 import { Bars, byteUnit, ChartCard, COLORS, Columns, count, hours, SeriesTable, type Series } from "./charts";
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
-const PERIODS = [
-  { days: 7, label: "7 days" },
-  { days: 30, label: "30 days" },
-  { days: 90, label: "90 days" },
-  { days: 365, label: "1 year" },
-  { days: 0, label: "All time" },
+const PERIODS: Array<{ label: string; p: GraphPeriod }> = [
+  { label: "24 hours", p: { hours: 24 } },
+  { label: "7 days", p: { days: 7 } },
+  { label: "30 days", p: { days: 30 } },
+  { label: "90 days", p: { days: 90 } },
+  { label: "1 year", p: { days: 365 } },
+  { label: "All time", p: { days: 0 } },
 ];
+const samePeriod = (a: GraphPeriod, b: GraphPeriod) => JSON.stringify(a) === JSON.stringify(b);
 
 interface Bucket extends GraphDay {
-  /** On the axis: "10 Nov". */
+  /** On the axis: "10 Nov", "14:00". */
   label: string;
-  /** In the tooltip: "10 Nov 2026", "Week of 3 Nov 2026", "November 2026". */
+  /** In the tooltip: "10 Nov 2026", "Week of 3 Nov 2026", "November 2026", "10 Nov 2026, 14:00–14:59". */
   title: string;
 }
 
 const dayName = (ms: number) => { const d = new Date(ms); return `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]}`; };
 const fullDay = (ms: number) => `${dayName(ms)} ${new Date(ms).getUTCFullYear()}`;
+const hh = (ms: number) => String(new Date(ms).getUTCHours()).padStart(2, "0");
 
-/** Days as they are, up to 120 of them; past that, weeks; past two years, months. */
-function bucketed(daily: GraphDay[]): { by: "day" | "week" | "month"; rows: Bucket[] } {
+/** A period from one local midnight to another. */
+const wholeDays = (from: number, to: number) =>
+  [from, to].every((t) => { const d = new Date(t); return d.getHours() === 0 && d.getMinutes() === 0 && d.getSeconds() === 0; });
+
+/** Hours as they are; days up to 120 of them; past that, weeks; past two years, months. */
+function bucketed(daily: GraphDay[], bucket: "day" | "hour"): { by: "hour" | "day" | "week" | "month"; rows: Bucket[] } {
+  if (bucket === "hour") {
+    return { by: "hour", rows: daily.map((d) => ({ ...d, label: hh(d.day) === "00" ? `${dayName(d.day)} 00:00` : `${hh(d.day)}:00`,
+      title: `${fullDay(d.day)}, ${hh(d.day)}:00–${hh(d.day)}:59` })) };
+  }
   const by = daily.length <= 120 ? "day" : daily.length <= 730 ? "week" : "month";
   const groups = new Map<string, Bucket>();
   daily.forEach((d, i) => {
@@ -43,7 +55,7 @@ function bucketed(daily: GraphDay[]): { by: "day" | "week" | "month"; rows: Buck
     }
     for (const k of Object.keys(d) as Array<keyof GraphDay>) {
       if (k === "day") continue;
-      b[k] = k === "peakViewers" ? Math.max(b[k], d[k]) : b[k] + d[k];
+      b[k] = k === "peakViewers" || k === "peakKbps" ? Math.max(b[k], d[k]) : b[k] + d[k];
     }
   });
   return { by, rows: [...groups.values()] };
@@ -52,10 +64,78 @@ function bucketed(daily: GraphDay[]): { by: "day" | "week" | "month"; rows: Buck
 const share = (n: number | null) => (n === null ? "—" : `${Math.round(n * 100)}%`);
 const tipTitle = (r: Record<string, unknown>) => String(r.title);
 
+/** A rate as the dashboard and Plex say it, and as qBittorrent and its manager do. */
+const mbps = (kbps: number | null) => (kbps === null ? "—" : `${(kbps / 1000).toFixed(kbps >= 100_000 ? 0 : 1)} Mbps`);
+const mibs = (kbps: number | null) => (kbps === null ? "—" : `${((kbps * 1000) / 8 / 1_048_576).toFixed(2)} MiB/s`);
+
+/** "2026-11-17T14:05", for a date-and-time field, on this browser's clock. */
+const fieldTime = (ms: number) => {
+  const d = new Date(ms);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+};
+
+/** A period of one's own: the last so many hours or days, from one date to another, or from one time to another. */
+function CustomPeriod({ onPick }: { onPick: (p: GraphPeriod) => void }) {
+  const [mode, setMode] = useState<"last" | "dates" | "times">("last");
+  const [n, setN] = useState("12");
+  const [unit, setUnit] = useState<"hours" | "days">("hours");
+  const [from, setFrom] = useState(() => fieldTime(Date.now() - 7 * 86_400_000));
+  const [to, setTo] = useState(() => fieldTime(Date.now()));
+  const [error, setError] = useState<string | null>(null);
+  const apply = () => {
+    if (mode === "last") {
+      const k = Math.floor(Number(n));
+      if (!(k > 0)) return setError("Enter a number above 0.");
+      setError(null);
+      return onPick(unit === "hours" ? { hours: k } : { days: k });
+    }
+    // A date's field is its day, from midnight; to the end of the last day.
+    const start = new Date(mode === "dates" ? `${from.slice(0, 10)}T00:00` : from).getTime();
+    let end = new Date(mode === "dates" ? `${to.slice(0, 10)}T00:00` : to).getTime();
+    if (mode === "dates") end = new Date(new Date(end).setDate(new Date(end).getDate() + 1)).getTime();
+    if (!Number.isFinite(start) || !Number.isFinite(end)) return setError("Enter both ends of the period.");
+    if (end <= start) return setError("The end has to be after the start.");
+    setError(null);
+    onPick({ from: start, to: end });
+  };
+  return (
+    <form className="custom-period" onSubmit={(e) => { e.preventDefault(); apply(); }}>
+      <select value={mode} onChange={(e) => setMode(e.target.value as typeof mode)} aria-label="Kind of period">
+        <option value="last">The last…</option>
+        <option value="dates">From one date to another</option>
+        <option value="times">From one time to another</option>
+      </select>
+      {mode === "last" ? (
+        <>
+          <input type="number" min={1} max={unit === "hours" ? 87_600 : 3_650} value={n} onChange={(e) => setN(e.target.value)}
+            aria-label="How many" className="short" />
+          <select value={unit} onChange={(e) => setUnit(e.target.value as typeof unit)} aria-label="Hours or days">
+            <option value="hours">hours</option>
+            <option value="days">days</option>
+          </select>
+        </>
+      ) : (
+        <>
+          <label>From <input type={mode === "dates" ? "date" : "datetime-local"} value={mode === "dates" ? from.slice(0, 10) : from}
+            onChange={(e) => setFrom(mode === "dates" ? `${e.target.value}T00:00` : e.target.value)} /></label>
+          <label>to <input type={mode === "dates" ? "date" : "datetime-local"} value={mode === "dates" ? to.slice(0, 10) : to}
+            onChange={(e) => setTo(mode === "dates" ? `${e.target.value}T00:00` : e.target.value)} /></label>
+        </>
+      )}
+      <button type="submit">Show</button>
+      {error && <span className="bad-text small">{error}</span>}
+    </form>
+  );
+}
+
 /** What the history says, over a period: Tautulli's graphs, for the theater. */
 export function Graphs({ onError }: { onError: (e: unknown) => void }) {
-  const [days, setDays] = useState(30);
-  const { data, busy } = useLoad(() => api.graphs(days), [days], onError);
+  const [period, setPeriod] = useState<GraphPeriod>({ days: 30 });
+  const [custom, setCustom] = useState(false);
+  const key = JSON.stringify(period);
+  const { data, busy } = useLoad(() => api.graphs(period), [key], onError);
+  const preset = PERIODS.some((p) => samePeriod(p.p, period));
   return (
     <>
       <div className="page-head">
@@ -64,10 +144,20 @@ export function Graphs({ onError }: { onError: (e: unknown) => void }) {
       </div>
       <div className="period" role="group" aria-label="Period">
         {PERIODS.map((p) => (
-          <button key={p.days} className={`chip ${days === p.days ? "on" : ""}`} aria-pressed={days === p.days}
-            onClick={() => setDays(p.days)}>{p.label}</button>
+          <button key={p.label} className={`chip ${!custom && samePeriod(p.p, period) ? "on" : ""}`} aria-pressed={!custom && samePeriod(p.p, period)}
+            onClick={() => { setCustom(false); setPeriod(p.p); }}>{p.label}</button>
         ))}
+        <button className={`chip ${custom || !preset ? "on" : ""}`} aria-pressed={custom || !preset} onClick={() => setCustom(!custom)}>Custom…</button>
       </div>
+      {custom && <CustomPeriod onPick={(p) => setPeriod(p)} />}
+      {data && (
+        <p className="muted small period-shown">
+          {/* Whole days, as "21 September to 1 October" was asked: the end day by its date. */}
+          {wholeDays(data.from, data.to) ? dateTime(data.from).slice(0, 10) : dateTime(data.from)} to {data.to > Date.now() ? "now"
+            : wholeDays(data.from, data.to) ? `the end of ${dateTime(data.to - 1).slice(0, 10)}` : dateTime(data.to)}
+          {data.bucket === "hour" ? " · by the hour" : ""}
+        </p>
+      )}
       {!data ? <p className="empty">{busy ? "Loading…" : "Couldn't read the history."}</p> : (
         <div className={busy ? "stale" : ""}>
           <GraphsBody g={data} />
@@ -77,9 +167,77 @@ export function Graphs({ onError }: { onError: (e: unknown) => void }) {
   );
 }
 
+/**
+ * What the bot's port sent: the upload the qBittorrent manager shares the
+ * line with, as it measured it, minute by minute.
+ */
+function Upload({ g, rows, per, label }: { g: GraphData; rows: Bucket[]; per: string; label: string }) {
+  const u = g.upload;
+  const unit = byteUnit(Math.max(0, ...rows.map((r) => r.sentBytes)));
+  const inUnit = (n: number) => `${n >= 100 ? Math.round(n) : n >= 10 ? n.toFixed(1) : n.toFixed(2)} ${unit.label}`;
+  const sentRows = rows.map((r) => ({ ...r, sent: r.sentBytes / unit.div, peak: r.peakKbps / 1000 }));
+  const sent: Series[] = [{ key: "sent", label: "Sent by the server", color: COLORS[0] }];
+  const peak: Series[] = [{ key: "peak", label: "Busiest minute", color: COLORS[0] }];
+  return (
+    <section className="card upload-card">
+      <div className="panel-head">
+        <h3>Server upload</h3>
+        <span className="muted small">
+          {u.since === null ? "Measured from this version on: nothing yet."
+            : `Everything the bot's port sent (video, playlists, subtitles, the page), measured since ${dateTime(u.since)}.`}
+        </span>
+      </div>
+      <div className="tiles">
+        <Tile label="Sent by the server" value={bytes(u.sentBytes)} sub={`${count(u.allMinutes)} minutes with traffic`} />
+        <Tile label="Average while playing" value={mbps(u.avgKbps)} sub={`${mibs(u.avgKbps)} · over ${count(u.minutes)} minutes`} />
+        <Tile label="95th percentile" value={mbps(u.p95Kbps)} sub={`${mibs(u.p95Kbps)} · 95% of minutes were at or under this`} />
+        <Tile label="Busiest minute" value={mbps(u.peakKbps)} sub={`${mibs(u.peakKbps)}${u.peakAt ? ` · ${dateTime(u.peakAt)}` : ""}`} />
+      </div>
+      <h4>By how many were watching</h4>
+      <div className="table-wrap">
+        <table className="table">
+          <thead>
+            <tr><th>Viewers</th><th className="num">Minutes</th><th className="num">Average</th><th className="num">95th pct.</th>
+              <th className="num">Busiest</th><th className="num" title="What the server sent over the bitrate of the one stream playing, over whole minutes of it">Sent ÷ bitrate</th></tr>
+          </thead>
+          <tbody>
+            {u.byViewers.map((r) => (
+              <tr key={r.viewers}>
+                <td>{r.viewers === 4 ? "4 or more" : r.viewers}</td>
+                <td className="num">{count(r.minutes)}</td>
+                {[r.avgKbps, r.p95Kbps, r.peakKbps].map((k, i) => (
+                  <td key={i} className="num nowrap">{mbps(k)}{k !== null && <div className="muted small">{mibs(k)}</div>}</td>
+                ))}
+                <td className="num nowrap">{r.perStream === null ? "—" : <>{r.perStream.toFixed(2)}×<div className="muted small">over {count(r.perStreamMinutes)} min</div></>}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p className="note">
+        For the qBittorrent manager: <span className="mono">MAX_UPLOAD_MIB</span> and <span className="mono">MIN_UPLOAD_MIB</span> are in MiB/s.
+        It reserves a stream's bitrate once for one viewer and, for more, that bitrate
+        × <span className="mono">THEATER_SHARED_BASE</span> × (1 + <span className="mono">THEATER_EXTRA_VIEWER_FACTOR</span> × (viewers − 1)).
+        The last column is what that came to here: what the server sent over the bitrate of the one stream playing, on average.
+      </p>
+      <div className="charts">
+        <ChartCard title={`Sent by the server ${per}`} series={sent}
+          table={<SeriesTable rows={sentRows} label={label} labelKey="label" series={sent} fmt={inUnit} />}>
+          <Columns rows={sentRows} x="label" series={sent} fmt={inUnit} axisFmt={(n) => `${count(n)} ${unit.label}`} decimals tipTitle={tipTitle} />
+        </ChartCard>
+        <ChartCard title={`Busiest minute ${per}`} sub="The server's upload in its busiest minute" series={peak}
+          table={<SeriesTable rows={sentRows} label={label} labelKey="label" series={peak} fmt={(n) => mbps(n * 1000)} />}>
+          <Columns rows={sentRows} x="label" series={peak} fmt={(n) => mbps(n * 1000)} axisFmt={(n) => `${count(n)} Mbps`} decimals tipTitle={tipTitle} />
+        </ChartCard>
+      </div>
+    </section>
+  );
+}
+
 function GraphsBody({ g }: { g: GraphData }) {
-  const { by, rows } = bucketed(g.daily);
-  const per = by === "day" ? "per day" : by === "week" ? "per week" : "per month";
+  const { by, rows } = bucketed(g.daily, g.bucket);
+  const per = by === "hour" ? "per hour" : by === "day" ? "per day" : by === "week" ? "per week" : "per month";
+  const names = usePlaceNames();
   const t = g.totals;
   const unit = byteUnit(Math.max(0, ...rows.map((r) => r.botBytes + r.edgeHitBytes + r.p2pBytes)));
   const inUnit = (n: number) => `${n >= 100 ? Math.round(n) : n >= 10 ? n.toFixed(1) : n.toFixed(2)} ${unit.label}`;
@@ -110,8 +268,9 @@ function GraphsBody({ g }: { g: GraphData }) {
   const weekRows = [1, 2, 3, 4, 5, 6, 0].map((w) => ({ ...g.weekdays[w], label: WEEKDAYS[w].slice(0, 3), title: WEEKDAYS[w] }));
   const titleRows = g.titles.map((x) => ({ ...x, name: x.title ?? `Plex item ${x.ratingKey}` }));
   const peopleRows = g.people.map((x) => ({ ...x, name: x.username ?? x.userId }));
-  const serverRows = g.servers.map((x) => ({ ...x, name: x.guildId ?? "Direct message" }));
-  const table = (series: Series[], fmt: (n: number) => string, r: Array<Record<string, unknown>> = chartRows, label = by === "day" ? "Day" : by === "week" ? "Week of" : "Month") =>
+  const serverRows = g.servers.map((x) => ({ ...x, name: names.guild(x.guildId) ?? x.guildId ?? "Direct message" }));
+  const rowLabel = by === "hour" ? "Hour" : by === "day" ? "Day" : by === "week" ? "Week of" : "Month";
+  const table = (series: Series[], fmt: (n: number) => string, r: Array<Record<string, unknown>> = chartRows, label = rowLabel) =>
     <SeriesTable rows={r} label={label} labelKey="label" series={series} fmt={fmt} />;
 
   return (
@@ -131,6 +290,8 @@ function GraphsBody({ g }: { g: GraphData }) {
       {t.plays === 0 && t.launches === 0 && t.requests === 0 && (
         <p className="note">No activity was recorded in this period.</p>
       )}
+
+      <Upload g={g} rows={rows} per={per} label={rowLabel} />
 
       <div className="charts">
         <ChartCard title={`Sessions ${per}`} series={one("plays", "Sessions")} table={table(one("plays", "Sessions"), count)}>
@@ -221,7 +382,7 @@ function TopTable({ rows, cols }: {
 
 /** A small chart over the last 30 days, at the top of another page. */
 export function MiniChart({ kind, onError }: { kind: "plays" | "people" | "data"; onError: (e: unknown) => void }) {
-  const { data } = useLoad(() => api.graphs(30), [], onError);
+  const { data } = useLoad(() => api.graphs({ days: 30 }), [], onError);
   if (!data) return null;
   const more = <>Last 30 days · <a href="#graphs">All statistics</a></>;
   const rows = data.daily.map((d) => ({ ...d, label: dayName(d.day), title: fullDay(d.day) }));

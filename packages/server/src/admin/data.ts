@@ -60,7 +60,10 @@ export interface ViewerData {
   errors: number;
 }
 
-export type ClientView = AdminRoom["clients"][number] & { data?: ViewerData };
+/** What a viewer's player is doing, from its log lines (admin/recorder.ts). */
+export interface PlayerNowView { stall: "buffering" | "start" | "seek" | null; sinceMs: number | null }
+
+export type ClientView = AdminRoom["clients"][number] & { data?: ViewerData; player?: PlayerNowView | null };
 
 export interface RoomView extends Omit<AdminRoom, "variants" | "clients"> {
   clients: ClientView[];

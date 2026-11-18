@@ -83,6 +83,8 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    // Opened with nothing after the address: Now Playing, and the address says so.
+    if (!location.hash.replace("#", "")) history.replaceState(null, "", "#now");
     api.session().then((s) => setSignedIn(s.signedIn)).catch(() => setSignedIn(false));
     const onHash = () => {
       setRoute(routeFromHash());

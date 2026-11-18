@@ -19,6 +19,8 @@ export interface TitleInfo {
   durationS: number | null;
   /** Whether Plex has a poster for it (the series' for an episode). */
   poster: boolean;
+  /** Its audio and subtitle tracks' names, by Plex stream id: "English (EAC3 5.1)". */
+  tracks: Record<string, string>;
 }
 
 /** Where the dashboard gets them; the tests give their own. */
@@ -54,6 +56,18 @@ export function plexTitles(): TitleSource {
       // frame of it, wide, and says less at a glance.
       const thumb = text(m.grandparentThumb) ?? text(m.parentThumb) ?? text(m.thumb);
       const duration = whole(m.duration);
+      // The names a viewer picks tracks by, for the ids a stream is made of.
+      const tracks: Record<string, string> = {};
+      const media = (Array.isArray(m.Media) ? m.Media : []) as Array<{ Part?: Array<{ Stream?: Array<Record<string, unknown>> }> }>;
+      for (const version of media) {
+        for (const part of version.Part ?? []) {
+          for (const s of part.Stream ?? []) {
+            if ((s.streamType !== 2 && s.streamType !== 3) || whole(s.id) === null) continue;
+            const name = text(s.extendedDisplayTitle) ?? text(s.displayTitle) ?? text(s.language) ?? text(s.title);
+            if (name) tracks[String(s.id)] = name.slice(0, 120);
+          }
+        }
+      }
       return {
         at: Date.now(),
         thumb,
@@ -67,6 +81,7 @@ export function plexTitles(): TitleSource {
           year: whole(m.year),
           durationS: duration === null ? null : Math.round(duration / 1000),
           poster: !!thumb,
+          tracks,
         },
       };
     } catch {

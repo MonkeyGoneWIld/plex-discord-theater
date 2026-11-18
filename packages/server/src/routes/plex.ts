@@ -6372,6 +6372,30 @@ function serveDirectStream(req: Request, res: Response, plexKey: string, segPath
  * (direct-stream.ts) or an ffmpeg run (ffmpeg/engine.ts), which are served
  * alike.
  */
+/**
+ * A segment of a copied stream the bot couldn't answer with, said in the log
+ * — once a stream for each kind, then how many more every half minute. On
+ * 15 November the player failed one segment of Verity for 12 minutes and
+ * the bot's log said nothing of it, so nothing said why.
+ */
+const unserved = new Map<string, { at: number; more: number }>();
+function noteUnserved(segPath: string, what: string, extra: Record<string, unknown> = {}): void {
+  const key = segPath.match(PLEX_SESSION_KEY_RE)?.[1] ?? "?";
+  const id = `${key}|${what}`;
+  const seen = unserved.get(id);
+  const now = Date.now();
+  if (seen && now - seen.at < 30_000) {
+    seen.more++;
+    return;
+  }
+  unserved.set(id, { at: now, more: 0 });
+  if (unserved.size > 500) unserved.delete(unserved.keys().next().value!);
+  console.warn(`[HLS seg] couldn't serve a segment: ${what}`, {
+    stream: key.substring(0, 8), seg: segPath.split("/").pop()?.split("?")[0], ...extra,
+    ...(seen?.more ? { moreSinceLast: seen.more } : {}),
+  });
+}
+
 async function serveMeasured(
   req: Request,
   res: Response,
@@ -6407,10 +6431,12 @@ async function serveMeasured(
   // player restarts where it is, which beats asking Plex for an old segment
   // and having it renumber.
   if (segment === "gone") {
+    noteUnserved(segPath, "its file is gone (410)");
     res.status(410).end();
     return;
   }
   if (!segment) {
+    noteUnserved(segPath, "not one of the stream's (404)");
     res.status(404).end();
     return;
   }
@@ -6423,8 +6449,12 @@ async function serveMeasured(
   // stream that has just ended is that stream's segment gone.
   const read = async (start: number, end: number): Promise<Buffer | null> => {
     try {
-      return await segment.read(start, end);
-    } catch {
+      const got = await segment.read(start, end);
+      // Fewer bytes than its size says: the player throws the part away and asks again.
+      if (got.length !== end - start) noteUnserved(segPath, "its file is shorter than it was", { asked: end - start, got: got.length, bytes: segment.bytes });
+      return got;
+    } catch (err) {
+      noteUnserved(segPath, "its file couldn't be read (410)", { error: err instanceof Error ? err.message : String(err) });
       res.status(410).end();
       return null;
     }
@@ -6432,6 +6462,7 @@ async function serveMeasured(
   if (req.query.parts !== undefined) {
     const bounds = partBounds(segment.bytes, Number(req.query.part), Number(req.query.parts));
     if (!bounds) {
+      noteUnserved(segPath, "a part it doesn't have (400)", { part: req.query.part, parts: req.query.parts, bytes: segment.bytes });
       res.status(400).end();
       return;
     }

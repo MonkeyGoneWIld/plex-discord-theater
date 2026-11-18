@@ -4,7 +4,7 @@ import path from "node:path";
 import express, { type Request, type Response } from "express";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
-import { AdminSessions, cookieToken, passwordMatches, requireAdmin, sessionCookie, SESSION_MS } from "./auth.js";
+import { AdminSessions, cookieToken, passwordMatches, requireAdmin, sessionCookie } from "./auth.js";
 import { logFiles, overview, readLog, settingsView } from "./data.js";
 import { MAX_GRAPH_DAYS, Recorder } from "./recorder.js";
 import { EXPORTS, exportFile, exportName, type ExportKind } from "./export.js";
@@ -46,7 +46,7 @@ export interface AdminOptions {
  */
 export function createAdminApp(opts: AdminOptions): express.Express {
   const now = opts.now ?? Date.now;
-  const sessions = new AdminSessions(now);
+  const sessions = new AdminSessions(opts.password);
   const distDir = opts.distDir ?? ADMIN_DIST;
   const app = express();
   app.disable("x-powered-by");
@@ -94,7 +94,7 @@ export function createAdminApp(opts: AdminOptions): express.Express {
     const token = sessions.create();
     res.setHeader("Set-Cookie", sessionCookie(req, token));
     logEvent("Admin", "dashboard sign-in", { from: req.ip ?? "unknown" });
-    res.json({ ok: true, expiresInS: Math.floor(SESSION_MS / 1000) });
+    res.json({ ok: true });
   });
 
   app.post("/api/logout", (req: Request, res: Response) => {
@@ -103,8 +103,13 @@ export function createAdminApp(opts: AdminOptions): express.Express {
     res.json({ ok: true });
   });
 
+  // Opening the page renews the cookie, so a browser keeps it for as long
+  // as the page is used.
   app.get("/api/session", (req: Request, res: Response) => {
-    res.json({ signedIn: sessions.valid(cookieToken(req)) });
+    const token = cookieToken(req);
+    const signedIn = sessions.valid(token);
+    if (signedIn) res.setHeader("Set-Cookie", sessionCookie(req, token));
+    res.json({ signedIn });
   });
 
   const admin = requireAdmin(sessions);
@@ -251,8 +256,13 @@ export function createAdminApp(opts: AdminOptions): express.Express {
     res.json({ guilds: recorder!.places() });
   });
   // Graphs: the history by day, over the last ?days= days (0: all of it).
+  // The names of Discord servers and channels, by id, for the page to show beside them.
+  app.get("/api/names", admin, recorded, (_req: Request, res: Response) => {
+    res.json(recorder!.placeNames());
+  });
   app.get("/api/graphs", admin, recorded, (req: Request, res: Response) => {
-    res.json(recorder!.graphs({ days: req.query.days, zone: req.query.tz }));
+    const q = req.query;
+    res.json(recorder!.graphs({ days: q.days, hours: q.hours, from: q.from, to: q.to, zone: q.tz }));
   });
   // The history file, and what removing what is older than ?days= days would remove.
   const trimDays = (v: unknown): number | null => {

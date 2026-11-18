@@ -40,7 +40,7 @@ fs.writeFileSync(path.join(logDir, "theater-2026-11-10.log"), [
 fs.writeFileSync(path.join(logDir, "notes.txt"), "not a log\n");
 
 const { createAdminApp, startAdminServer } = await import("../src/admin/server.js");
-const { AdminSessions, cookieToken } = await import("../src/admin/auth.js");
+const { AdminSessions, cookieName, cookieToken } = await import("../src/admin/auth.js");
 const { summaryOf } = await import("../src/admin/data.js");
 const { rememberStreamNotes } = await import("../src/services/stream-notes.js");
 const { attachWebSocketServer, closeWebSocketServer } = await import("../src/services/sync.js");
@@ -60,7 +60,7 @@ const login = (password: string) => fetch(`${origin}/api/login`, {
 
 console.log("\n— nothing without signing in —");
 for (const p of ["/api/overview", "/api/live", "/api/logs", "/api/logs/files", "/api/settings", "/api/history", "/api/history/1", "/api/usage",
-  "/api/requests", "/api/people", "/api/people/111", "/api/places", "/api/caches", "/api/graphs", "/api/history-file",
+  "/api/requests", "/api/people", "/api/people/111", "/api/places", "/api/names", "/api/caches", "/api/graphs", "/api/history-file",
   "/api/export/history.csv", "/api/export/admin.sqlite", "/api/titles?keys=1", "/api/poster/1"]) {
   const res = await fetch(origin + p);
   check(`${p}: 401`, [res.status, ((await res.json()) as { error?: string }).error], [401, "Sign in first"]);
@@ -69,18 +69,26 @@ const unsignedTrim = await fetch(`${origin}/api/history-file/trim`, { method: "P
 check("/api/history-file/trim: 401", unsignedTrim.status, 401);
 const wrong = await login("not it");
 check("a wrong password: 401 and no cookie", [wrong.status, wrong.headers.get("set-cookie")], [401, null]);
-const forged = await fetch(`${origin}/api/overview`, { headers: { Cookie: `pdt_admin=${"a".repeat(64)}` } });
+const port = new URL(origin).port;
+const forged = await fetch(`${origin}/api/overview`, { headers: { Cookie: `pdt_admin_${port}=${"a".repeat(64)}` } });
 check("a cookie it never gave: 401", forged.status, 401);
 
 console.log("\n— signing in —");
 const right = await login(PASSWORD);
 const setCookie = right.headers.get("set-cookie") ?? "";
-check("the password: 200, an HttpOnly, SameSite=Strict session cookie, not Secure over plain HTTP",
-  [right.status, /^pdt_admin=[0-9a-f]{64};/.test(setCookie), /HttpOnly/.test(setCookie), /SameSite=Strict/.test(setCookie), /Secure/.test(setCookie)],
+check("the password: 200, an HttpOnly, SameSite=Strict session cookie named for the port, not Secure over plain HTTP",
+  [right.status, new RegExp(`^pdt_admin_${port}=[0-9a-f]{64};`).test(setCookie), /HttpOnly/.test(setCookie), /SameSite=Strict/.test(setCookie),
+    /Secure/.test(setCookie)],
   [200, true, true, true, false]);
+check("  kept for 400 days, as long as a browser keeps one", /Max-Age=34560000(;|$)/.test(setCookie), true);
 const cookie = setCookie.split(";")[0];
 const get = (p: string) => fetch(origin + p, { headers: { Cookie: cookie } });
-check("  and the page knows it is signed in", await (await get("/api/session")).json(), { signedIn: true });
+const sessionNow = await get("/api/session");
+check("  and the page knows it is signed in, and opening it renews the cookie",
+  [await sessionNow.json(), (sessionNow.headers.get("set-cookie") ?? "").split(";")[0], /Max-Age=34560000/.test(sessionNow.headers.get("set-cookie") ?? "")],
+  [{ signedIn: true }, cookie, true]);
+const unsignedSession = await fetch(`${origin}/api/session`);
+check("  signed out, no cookie is set", [await unsignedSession.json(), unsignedSession.headers.get("set-cookie")], [{ signedIn: false }, null]);
 const noHistory = await get("/api/history");
 check("  without a recorder, no history, and it says so", [noHistory.status, await noHistory.json()], [503, { error: "Nothing is recorded" }]);
 check("  nor graphs, files or the history file",
@@ -183,7 +191,7 @@ console.log("\n— the history, from the live room —");
   // Posters and running times, as Plex would give them.
   const titles = {
     info: async (k: string) => (k === "58860" ? { ratingKey: k, type: "episode", title: "The Red Paper", show: "Ghost Stories", season: 1, episode: 2,
-      year: null, durationS: 1440, poster: true } : null),
+      year: null, durationS: 1440, poster: true, tracks: {} } : null),
     poster: async (k: string) => (k === "58860" ? { type: "image/png", body: Buffer.from([1, 2, 3]) } : null),
   };
   // What Seerr says of a requested title now: declined since.
@@ -248,6 +256,13 @@ console.log("\n— the history, from the live room —");
   check("graphs: a week by day, and its totals", [graphs.days, graphs.daily.length, graphs.totals.plays, graphs.totals.people, graphs.totals.reencodes],
     [7, 7, 1, 2, 1]);
   check("  a period it can't use: 30 days", ((await (await hget("/api/graphs?days=soon")).json()) as G).days, 30);
+  type GP = { lastHours: number | null; bucket: string; from: number; to: number };
+  const byHours = (await (await hget("/api/graphs?hours=6")).json()) as GP;
+  const fromTo = (await (await hget(`/api/graphs?from=${Date.UTC(2026, 8, 21)}&to=${Date.UTC(2026, 9, 2)}`)).json()) as GP;
+  check("  the last so many hours, or 21 September to 1 October: as asked",
+    [byHours.lastHours, byHours.bucket, byHours.to - byHours.from, fromTo.lastHours, fromTo.bucket, fromTo.from, fromTo.to],
+    [6, "hour", 6 * 3_600_000, null, "day", Date.UTC(2026, 8, 21), Date.UTC(2026, 9, 2)]);
+  check("  and the names of the servers and channels it knows", await (await hget("/api/names")).json(), { guilds: {}, channels: {} });
   const csv = await hget("/api/export/history.csv");
   const csvBytes = Buffer.from(await csv.arrayBuffer());
   const csvLines = csvBytes.toString("utf8").replace(/^\uFEFF/, "").split("\r\n");
@@ -368,17 +383,28 @@ console.log("\n— signing out, sessions ending, guessing —");
 const out = await fetch(`${origin}/api/logout`, { method: "POST", headers: { Cookie: cookie } });
 check("signing out clears the cookie", /Max-Age=0/.test(out.headers.get("set-cookie") ?? ""), true);
 check("  and the session is gone", (await get("/api/overview")).status, 401);
-let clock = 0;
-const sessions = new AdminSessions(() => clock, 1000);
+// 17 November: sessions were in memory for 12 hours, so the dashboard
+// asked for the password after every restart and every evening.
+const sessions = new AdminSessions(PASSWORD);
 const t = sessions.create();
-clock = 999;
-const before = sessions.valid(t);
-clock = 1000;
-check("a session lasts its time and no longer", [before, sessions.valid(t), sessions.size], [true, false, 0]);
-const req = (c: string) => ({ headers: { cookie: c } }) as Parameters<typeof cookieToken>[0];
+const tampered = t.slice(0, 63) + (t[63] === "0" ? "1" : "0");
+check("a session holds after a restart, as long as the password is the same, and never runs out",
+  [sessions.valid(t), new AdminSessions(PASSWORD).valid(t), new AdminSessions(`${PASSWORD}!`).valid(t),
+    sessions.valid(tampered), sessions.valid("a".repeat(64)), sessions.valid(null), /^[0-9a-f]{64}$/.test(t), t === sessions.create()],
+  [true, true, false, false, false, false, true, false]);
+sessions.revoke(t);
+check("  signing out ends it", sessions.valid(t), false);
+const req = (c: string, host = "192.168.1.25:3060") => ({ headers: { cookie: c, host } }) as Parameters<typeof cookieToken>[0];
 check("a cookie is read only as one of its own tokens",
-  [cookieToken(req(`a=1; pdt_admin=${"b".repeat(64)}`)), cookieToken(req("pdt_admin=../../x")), cookieToken(req(""))],
+  [cookieToken(req(`a=1; pdt_admin_3060=${"b".repeat(64)}`)), cookieToken(req("pdt_admin_3060=../../x")), cookieToken(req(""))],
   ["b".repeat(64), null, null]);
+// Two bots' dashboards on one machine, on 3060 and 3050: a browser keeps
+// cookies by host, so with one name each sign-in replaced the other's.
+const both = `pdt_admin_3050=${"c".repeat(64)}; pdt_admin_3060=${"d".repeat(64)}; pdt_admin=${"e".repeat(64)}`;
+check("  each port's dashboard reads its own cookie, and not the one every port shared before",
+  [cookieName(req("", "192.168.1.25:3060")), cookieName(req("", "nas.local")), cookieToken(req(both, "192.168.1.25:3050")),
+    cookieToken(req(both, "192.168.1.25:3060")), cookieToken(req(`pdt_admin=${"e".repeat(64)}`))],
+  ["pdt_admin_3060", "pdt_admin_80", "c".repeat(64), "d".repeat(64), null]);
 // 6 a window: 1 wrong and 1 right above, then these.
 const tries: number[] = [];
 for (let i = 0; i < 5; i++) tries.push((await login("guess")).status);

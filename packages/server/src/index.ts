@@ -20,6 +20,7 @@ import logRoutes from "./routes/logs.js";
 import qbtManagerRoutes from "./routes/qbt-manager.js";
 import presenceRoutes from "./routes/presence.js";
 import { startAdminServer } from "./admin/server.js";
+import { meterUpload } from "./services/upload-meter.js";
 import { requireAuth, closeSessionDb } from "./middleware/auth.js";
 import { hlsLimiters } from "./middleware/hls-limit.js";
 import * as thumbCache from "./services/thumb-cache.js";
@@ -381,6 +382,8 @@ const server = app.listen(PORT, () => {
 });
 
 attachWebSocketServer(server);
+// What the port sends, for the dashboard's server upload.
+meterUpload(server);
 
 // The admin page, on a port of its own (ADMIN_PORT), with ADMIN_PASSWORD set.
 const admin = startAdminServer(PORT);

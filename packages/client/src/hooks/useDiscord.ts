@@ -264,6 +264,14 @@ export function useDiscord(): DiscordState {
           instanceId: sdk.instanceId,
           channelId: sdk.channelId ?? "none",
         });
+        // The voice channel's name, for the Theater Dashboard: Discord tells the
+        // bot only its id. Nothing waits on it, and it may not be given.
+        const channelId = sdk.channelId;
+        if (channelId) {
+          sdk.commands.getChannel({ channel_id: channelId }).then((ch) => {
+            if (ch?.name) logEvent("Discord", "channel", { channelId, guildId: sdk.guildId ?? null, name: ch.name });
+          }).catch(() => {});
+        }
 
         // Presence remains optional; a missing scope cannot prevent joining.
         presenceReadyRef.current = true;

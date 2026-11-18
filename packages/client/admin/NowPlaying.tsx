@@ -1,7 +1,8 @@
 import { useState } from "react";
 import type { Client, Overview, Room, Stream } from "./types";
 import { ago, bytes, clock, dateTime, quality, rate, zoneLabel } from "./format";
-import { BufferingCell, bufferingTone, DataCell, DecisionBadge } from "./parts";
+import { BufferingCell, bufferingTone, DataCell, DecisionBadge, PlaceName } from "./parts";
+import { switchedText, trackName } from "./events";
 import { StreamCard, type StreamInfo } from "./streams";
 import { Icon } from "./icons";
 import { Poster, titleLine, useTitles } from "./titles";
@@ -13,15 +14,31 @@ const CAP_LABELS: Record<string, string> = {
   hdr: "HDR", tenBit: "10-bit", uhd: "4K", hi10: "10-bit H.264",
 };
 
-type State = "playing" | "paused" | "buffering" | "idle";
+type State = "playing" | "paused" | "waiting" | "idle";
 
-const stateOf = (room: Room): State => (!room.ratingKey ? "idle" : room.waiting ? "buffering" : room.playing ? "playing" : "paused");
+const stateOf = (room: Room): State => (!room.ratingKey ? "idle" : room.waiting ? "waiting" : room.playing ? "playing" : "paused");
 const STATE: Record<State, { label: string; tone: string }> = {
   playing: { label: "Playing", tone: "good" },
   paused: { label: "Paused", tone: "muted" },
-  buffering: { label: "Buffering", tone: "warn" },
+  waiting: { label: "Waiting for the host", tone: "warn" },
   idle: { label: "Idle", tone: "muted" },
 };
+
+/**
+ * What a room waiting for the host's picture is waiting through: the room
+ * holds only for the host, and everybody else catches up while it plays.
+ */
+const WAITING: Record<string, string> = {
+  "a stream is starting": "Starting", "a seek": "Loading after a seek", resumed: "Resuming",
+  "the host's stream is being rebuilt": "Host's stream restarting", "the host is waiting for its stream": "Host loading",
+  "new host": "New host loading", "everybody left": "Waiting for the host",
+};
+function stateLabel(room: Room, state: State): string {
+  if (state !== "waiting") return STATE[state].label;
+  const did = switchedText(room.switching);
+  if (did) return `Host ${did}`;
+  return WAITING[room.waitingWhy ?? ""] ?? STATE.waiting.label;
+}
 
 /** A person's name where it is known: from the room, or from the history for somebody who has left. */
 const known = (room: Room, userId: string | null | undefined) =>
@@ -63,28 +80,45 @@ function sessionTotals(room: Room) {
 }
 
 /** A room's stream, as the shared card takes it. */
-function infoOf(room: Room, stream: Stream, n: number): StreamInfo {
+function infoOf(room: Room, stream: Stream, n: number, tracks: Record<string, string> | null): StreamInfo {
   return {
     n, started: !!stream.hlsSessionId, decision: stream.decision, reason: stream.reason, notes: stream.notes, kbps: stream.kbps,
     kbpsSource: stream.kbpsSource, engine: stream.engine, quality: stream.quality, variantKey: stream.variantKey,
     hlsSessionId: stream.hlsSessionId, audioStreamId: stream.audioStreamId, subtitleStreamId: stream.subtitleStreamId,
     ownerName: stream.ownerUserId ? nameOf(room, stream.ownerUserId) : null, ownerUserId: stream.ownerUserId, offsetS: stream.sessionOffset,
     isHostStream: stream.isHostStream, viewers: stream.viewers.map((id) => ({ id, name: nameOf(room, id) })), idleS: stream.idleS,
-    plexTranscodeKey: stream.plexTranscodeKey, plexClientId: stream.plexClientId, notesAt: stream.notesAt,
+    plexTranscodeKey: stream.plexTranscodeKey, plexClientId: stream.plexClientId, notesAt: stream.notesAt, tracks,
   };
 }
 
-function status(c: Client): { text: string; tone: string } {
+const forS = (ms: number | null | undefined) => (ms ? ` · ${Math.round(ms / 1000)} s` : "");
+
+/**
+ * What a viewer is doing, from their player's own log when the history is
+ * recorded: "Buffering" only while it has stopped for data mid-play. Loading
+ * the start or after a seek is not buffering, and neither is a player with
+ * under 15 seconds in hand that is still playing (the room's "loading").
+ */
+function status(c: Client): { text: string; tone: string; title?: string } {
   if (!c.connected) return { text: "Disconnected", tone: "bad" };
   if (c.away) return { text: "Away", tone: "muted" };
-  if (c.loading) return { text: "Buffering", tone: "warn" };
-  if (c.watching) return { text: "Watching", tone: "good" };
+  const p = c.player;
+  if (p?.stall === "buffering") return { text: `Buffering${forS(p.sinceMs)}`, tone: "warn", title: "Their player stopped to wait for data" };
+  if (p?.stall === "start") return { text: `Loading${forS(p.sinceMs)}`, tone: "muted", title: "Their player is loading the start" };
+  if (p?.stall === "seek") return { text: `Loading after a seek${forS(p.sinceMs)}`, tone: "muted" };
+  if (p === undefined && c.loading) {
+    // Not recorded: only the room's word, that they have under 15 s in hand.
+    return { text: "Filling buffer", tone: "muted", title: "Under 15 seconds of picture loaded ahead" };
+  }
+  if (c.watching) {
+    return { text: "Watching", tone: "good", title: c.loading ? "Playing, with under 15 seconds of picture loaded ahead" : undefined };
+  }
   return { text: "Browsing", tone: "muted" };
 }
 
 const ROLE: Record<string, string> = { host: "Host", "co-host": "Co-host", viewer: "Viewer" };
 
-function Viewers({ room }: { room: Room }) {
+function Viewers({ room, tracks }: { room: Room; tracks: Record<string, string> | null }) {
   const [open, setOpen] = useState<string | null>(null);
   const streamOf = new Map(room.streams.map((s, i) => [s.variantKey, { n: i + 1, s }]));
   const recorded = room.clients.some((c) => c.data);
@@ -115,7 +149,7 @@ function Viewers({ room }: { room: Room }) {
                       </span>
                     </span>
                   </td>
-                  <td><span className={`health ${st.tone}`}><span className={`dot ${st.tone}`} />{st.text}</span></td>
+                  <td><span className={`health ${st.tone}`} title={st.title}><span className={`dot ${st.tone}`} />{st.text}</span></td>
                   <td>{on ? <span className="nowrap">Stream {on.n} <DecisionBadge s={{ ...on.s, started: !!on.s.hlsSessionId }} /></span> : "—"}</td>
                   {recorded && (c.data
                     ? <><td className="nowrap">{clock(c.data.watchedS)}</td><td><DataCell d={c.data} /></td><td><BufferingCell d={c.data} /></td></>
@@ -130,7 +164,8 @@ function Viewers({ room }: { room: Room }) {
                         <dt>Joined</dt><dd>{dateTime(c.joinedAt)} ({ago((Date.now() - c.joinedAt) / 1000)} ago)</dd>
                         <dt>Stream key</dt><dd className="mono">{c.variantKey ?? "—"}</dd>
                         <dt>Quality limit</dt><dd>{quality(c.quality)}</dd>
-                        <dt>Subtitle track</dt><dd className="mono">{c.subtitleStreamId || "Off"}</dd>
+                        <dt>Subtitle track</dt>
+                        <dd>{trackName({ tracks }, c.subtitleStreamId, "Off")}{c.subtitleStreamId ? <> <span className="mono muted">{c.subtitleStreamId}</span></> : null}</dd>
                         <dt>Player can decode</dt>
                         <dd>{c.caps.length ? c.caps.map((cap) => CAP_LABELS[cap] ?? cap).join(", ") : "H.264 and AAC only"}{c.av1Encode ? " · can encode AV1" : ""}</dd>
                         {c.data && (
@@ -157,7 +192,7 @@ function FragmentRows({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
-function Session({ room, durationS, sub }: { room: Room; durationS: number | null; sub: string | null }) {
+function Session({ room, durationS, sub, tracks }: { room: Room; durationS: number | null; sub: string | null; tracks: Record<string, string> | null }) {
   const state = stateOf(room);
   const watching = room.clients.filter((c) => c.connected && c.watching).length;
   const totals = sessionTotals(room);
@@ -180,7 +215,7 @@ function Session({ room, durationS, sub }: { room: Room; durationS: number | nul
           <span className="badge muted">Idle</span>
         </div>
         <Facts room={room} watching={watching} />
-        {room.clients.length > 0 && <Viewers room={room} />}
+        {room.clients.length > 0 && <Viewers room={room} tracks={tracks} />}
       </section>
     );
   }
@@ -194,7 +229,10 @@ function Session({ room, durationS, sub }: { room: Room; durationS: number | nul
               <h3>{room.title ?? `Plex item ${room.ratingKey}`}</h3>
               {sub && <div className="session-sub">{sub}</div>}
             </div>
-            <span className={`badge big ${STATE[state].tone}`}><span className={`dot ${STATE[state].tone}`} />{STATE[state].label}{room.hostWaiting ? " · host" : ""}</span>
+            <span className={`badge big ${STATE[state].tone}`}
+              title={state === "waiting" ? "The room waits only for the host's picture; viewers who aren't ready catch up while it plays" : undefined}>
+              <span className={`dot ${STATE[state].tone}`} />{stateLabel(room, state)}
+            </span>
           </div>
           <Progress positionS={room.positionS} durationS={durationS} state={state} />
           <Facts room={room} watching={watching} />
@@ -244,13 +282,13 @@ function Session({ room, durationS, sub }: { room: Room; durationS: number | nul
       {room.streams.length > 0 && (
         <div className="session-block">
           <h4>Streams ({room.streams.length})</h4>
-          {room.streams.map((s, i) => <StreamCard key={s.variantKey} s={infoOf(room, s, i + 1)} />)}
+          {room.streams.map((s, i) => <StreamCard key={s.variantKey} s={infoOf(room, s, i + 1, tracks)} />)}
         </div>
       )}
 
       <div className="session-block">
         <h4>Viewers ({room.clients.length})</h4>
-        <Viewers room={room} />
+        <Viewers room={room} tracks={tracks} />
       </div>
 
       {(room.away.length > 0 || room.queue.length > 0 || room.held) && (
@@ -274,9 +312,9 @@ function Facts({ room, watching }: { room: Room; watching: number }) {
     <div className="facts">
       <span className="fact"><Icon name="users" size={14} />Host <strong>{nameOf(room, room.discord.hostUserId)}</strong></span>
       <span className="fact"><Icon name="people" size={14} /><strong>{watching}</strong> of {room.clients.length} watching</span>
-      <span className="fact" title="Discord server ID"><Icon name="places" size={14} />Server <span className="mono">{room.discord.guildId ?? "—"}</span></span>
-      <span className="fact" title="Discord channel ID">Channel <span className="mono">{room.discord.channelId ?? "—"}</span></span>
-      <span className="fact" title={`Room ${room.id}`}><Icon name="clock" size={14} />Opened {dateTime(room.discord.startedAt)}</span>
+      <span className="fact"><Icon name="places" size={14} />Server <strong><PlaceName kind="guild" id={room.discord.guildId} /></strong></span>
+      <span className="fact">Channel <strong><PlaceName kind="channel" id={room.discord.channelId} /></strong></span>
+      <span className="fact" title={`The Activity's room in Discord: instance ${room.id}`}><Icon name="clock" size={14} />Opened {dateTime(room.discord.startedAt)}</span>
       {room.playId ? <a className="fact" href={`#history/${room.playId}`}>Session timeline →</a> : null}
     </div>
   );
@@ -342,7 +380,7 @@ export function NowPlaying({ data }: { data: Overview | null }) {
         )
         : data.rooms.map((r) => {
           const i = info(r.ratingKey);
-          return <Session key={r.id} room={r} durationS={i?.durationS ?? null} sub={titleLine(i)} />;
+          return <Session key={r.id} room={r} durationS={i?.durationS ?? null} sub={titleLine(i)} tracks={i?.tracks ?? null} />;
         })}
     </>
   );

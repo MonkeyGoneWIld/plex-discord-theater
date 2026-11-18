@@ -31,6 +31,12 @@ export interface Client {
   av1Encode: boolean;
   /** While the admin page records. */
   data?: ViewerData;
+  /**
+   * What their player is doing, from its own log: stopped for data
+   * ("buffering"), loading the start or after a seek, or playing (null).
+   * Null when it hasn't said for half a minute.
+   */
+  player?: { stall: "buffering" | "start" | "seek" | null; sinceMs: number | null } | null;
 }
 
 export interface Stream {
@@ -63,6 +69,9 @@ export interface Room {
   playing: boolean;
   positionS: number;
   waiting: boolean;
+  /** While it waits for the host's picture: what for ("a stream is starting", "a seek"…), and the host's track change behind it. */
+  waitingWhy?: string | null;
+  switching?: string | null;
   hostWaiting: boolean;
   stateAgeS: number;
   hostHeartbeatAgeS: number | null;
@@ -94,6 +103,8 @@ export interface TitleInfo {
   year: number | null;
   durationS: number | null;
   poster: boolean;
+  /** Its audio and subtitle tracks' names, by Plex stream id. */
+  tracks?: Record<string, string>;
 }
 
 export interface Overview {
@@ -188,11 +199,18 @@ export interface PlayEvent {
   detail: Record<string, unknown> | null;
 }
 
+/** Where in the title the room was: [time, position in seconds (below 0: a break), playing 1 or 0]. */
+export type TrackPoint = [number, number, number];
+
 export interface PlayDetail {
   play: Play;
   viewers: PlayViewer[];
   streams: PlayStream[];
   events: PlayEvent[];
+  /** The room's position over the session. */
+  track?: TrackPoint[];
+  /** What of the title each viewer watched: [from, to] in seconds of it, by user id. */
+  watched?: Record<string, Array<[number, number]>>;
 }
 
 export interface PersonSummary extends ViewerData {
@@ -339,10 +357,27 @@ export interface GraphDay {
   reencodes: number;
   requests: number;
   launches: number;
+  /** What the bot's port sent, and its busiest minute in kilobits a second. */
+  sentBytes: number;
+  peakKbps: number;
+}
+
+/** The bot's upload over minutes something played. */
+export interface UploadRates {
+  minutes: number;
+  avgKbps: number | null;
+  p95Kbps: number | null;
+  peakKbps: number | null;
+  /** Over whole minutes of one stream: what was sent over that stream's bitrate. */
+  perStream: number | null;
+  perStreamMinutes: number;
 }
 
 export interface Graphs {
   days: number;
+  lastHours: number | null;
+  /** What each of `daily` is: a day, or an hour for three days or less. */
+  bucket: "day" | "hour";
   /** The time zone its days, hours and weekdays are in. */
   zone: string;
   from: number;
@@ -355,7 +390,17 @@ export interface Graphs {
   people: Array<{ userId: string; username: string | null; plays: number; watchedS: number; bytes: number }>;
   servers: Array<{ guildId: string | null; plays: number; people: number; watchedS: number }>;
   reasons: Array<{ reason: string; streams: number }>;
+  upload: UploadRates & {
+    since: number | null;
+    sentBytes: number;
+    allMinutes: number;
+    peakAt: number | null;
+    byViewers: Array<UploadRates & { viewers: number }>;
+  };
 }
+
+/** Discord servers' and channels' names, by id. */
+export interface PlaceNames { guilds: Record<string, string>; channels: Record<string, string> }
 
 export interface HistorySummary {
   path: string;

@@ -3,6 +3,7 @@ import { createSession, isValidSession, getSessionUserId, getSessionGuildIds } f
 import Database from "better-sqlite3";
 import path from "node:path";
 import fs from "node:fs";
+import { adminHooks } from "../services/admin-hooks.js";
 
 const router = Router();
 
@@ -237,6 +238,24 @@ router.post("/token", async (req: Request, res: Response) => {
  * of an activity they're legitimately in. The distinction between null and []
  * is load-bearing — see the allowlist check in /register.
  */
+/**
+ * The names of servers people signing in are in, as Discord's list said:
+ * the dashboard is told the name of the one somebody starts or joins an
+ * Activity in, at /register. Kept in memory only, and only so many.
+ */
+const guildNames = new Map<string, string>();
+const MAX_GUILD_NAMES = 2_000;
+
+function noteGuildNames(guilds: unknown[]): void {
+  for (const g of guilds) {
+    const { id, name } = (g && typeof g === "object" ? g : {}) as { id?: unknown; name?: unknown };
+    if (typeof id !== "string" || typeof name !== "string" || !name) continue;
+    guildNames.delete(id);
+    guildNames.set(id, name);
+    if (guildNames.size > MAX_GUILD_NAMES) guildNames.delete(guildNames.keys().next().value!);
+  }
+}
+
 async function fetchUserGuildIds(accessToken: string): Promise<string[] | null> {
   // One retry, because a null answer is refused at /register when an allowlist
   // is configured — and Discord rate-limits this endpoint per user, which a
@@ -267,6 +286,7 @@ async function fetchUserGuildIds(accessToken: string): Promise<string[] | null> 
       }
       const guilds = (await res.json()) as unknown;
       if (!Array.isArray(guilds)) return null;
+      noteGuildNames(guilds);
       return guilds
         .map((g) => (g && typeof g === "object" ? (g as { id?: unknown }).id : undefined))
         .filter((id): id is string => typeof id === "string");
@@ -443,6 +463,10 @@ router.post("/register", (req: Request, res: Response) => {
     }
     insertInstanceStmt.run(instanceId, userId, normalizedGuildId, normalizedChannelId, now);
   }
+
+  // The server's name, for the dashboard, from the list Discord gave at sign-in.
+  const guildName = normalizedGuildId && guildIsVerified ? guildNames.get(normalizedGuildId) : undefined;
+  if (guildName && adminHooks.on) adminHooks.place({ at: Date.now(), kind: "guild", id: normalizedGuildId, name: guildName });
 
   const hostId = instanceHosts.get(instanceId)!.hostUserId;
   res.json({ isHost: hostId === userId, hostId });

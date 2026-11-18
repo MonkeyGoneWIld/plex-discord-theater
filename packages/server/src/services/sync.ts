@@ -421,6 +421,8 @@ interface RoomState {
    * the room runs catches up with it (the client's catchUpWithRoom).
    */
   waiting: boolean;
+  /** What the room is waiting for the host for, as updateWaiting was told: "a stream is starting", "a seek"… */
+  waitingWhy: string | null;
   /** Names the latest moment the room waits for the host's picture, so a
    *  viewer is placed for each start once (the client's placeForRoomStart). */
   gatherSeq: number;
@@ -590,6 +592,7 @@ function updateWaiting(room: Room, roomId: string | null, why: string): void {
     if (waiting) s.position = interpolatedPosition(s);
     s.updatedAt = Date.now();
     s.waiting = waiting;
+    s.waitingWhy = waiting ? why : null;
     // Not "running" for a room that has just stopped or paused: it isn't.
     logEvent("Sync", waiting ? "room waiting" : running ? "room running" : "room no longer waiting", {
       room: roomId?.substring(0, 8) ?? "?",
@@ -1095,6 +1098,9 @@ export interface AdminRoom {
   playing: boolean;
   positionS: number;
   waiting: boolean;
+  /** While it waits: what for, and the host's track change behind it ("audio", "subtitle", "quality", "reload"). */
+  waitingWhy: string | null;
+  switching: string | null;
   hostWaiting: boolean;
   /** Seconds since the last play, pause or seek. */
   stateAgeS: number;
@@ -1153,6 +1159,8 @@ export function adminRooms(now = Date.now()): AdminRoom[] {
       playing: s.playing,
       positionS: interpolatedPosition(s),
       waiting: s.waiting,
+      waitingWhy: s.waiting ? s.waitingWhy : null,
+      switching: s.waiting ? s.hostSwitching : null,
       hostWaiting: s.hostWaiting,
       stateAgeS: Math.max(0, tick - s.transportChangedAt) / 1000,
       hostHeartbeatAgeS: s.hostHeartbeatAt === null ? null : Math.max(0, tick - s.hostHeartbeatAt) / 1000,
@@ -1244,6 +1252,7 @@ function getOrCreateRoom(instanceId: string): Room {
         positionConfirmed: false,
         hostWaiting: false,
         waiting: false,
+        waitingWhy: null,
         gatherSeq: 0,
         gatherOpen: false,
         gatherAnnounced: 0,

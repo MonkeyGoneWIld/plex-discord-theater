@@ -9,7 +9,7 @@
  */
 import { eventDetails, eventText, eventTone, finishedAt, groupOf, jumpsOf, newestFirst, positionAt, positionTicks, streamDiff, trackName, unionParts, variantParts } from "../admin/events";
 import { clientName, clientsOf, rolesOf } from "../admin/clients";
-import { awayOf, deliveryParts, loadTimes, pausesByPerson, pausesOf, streamAt } from "../admin/session";
+import { awayOf, deliveryParts, hostAt, loadTimes, pausesByPerson, pausesOf, streamAt } from "../admin/session";
 import { drift } from "../admin/timeline";
 import { progressText } from "../admin/streams";
 import { sessionLogsHref } from "../admin/Logs";
@@ -282,6 +282,20 @@ const theirs: TrackPoint[] = [[0, 0, 1], [10000, 10, 1], [20000, 20, 1], [30000,
 check("  what they watched by it: transcoded until the move, direct after; a jump is not watched",
   deliveryParts(theirs, moved, streams, "1"),
   [{ from: 0, to: 30, decision: "transcode" }, { from: 30, to: 40, decision: "copy" }, { from: 100, to: 110, decision: "copy" }]);
+// 18 November: a co-host joined onto the host's stream (the only one, the host's own) and no move was recorded.
+const hostOwn = [stream("9:0", "copy", "1")];
+const joinedOnto = [by("play", "1", 0, { role: "host" }), by("stream changed", "1", 500, { from: null, to: "9:0" }),
+  by("joined", "2", 30000, { role: "viewer" }), by("role", "2", 60000, { from: "viewer", to: "co-host" }),
+  by("role", "2", 90000, { from: "co-host", to: "host" }), by("left", "1", 90000)];
+check("  one who joined onto the host's stream, none recorded for them: the host's, as viewer, co-host and host",
+  [streamAt(joinedOnto, hostOwn, "2", 40000)?.variantKey, streamAt(joinedOnto, hostOwn, "2", 70000)?.variantKey,
+    streamAt(joinedOnto, hostOwn, "2", 95000)?.variantKey, hostAt(joinedOnto, 70000), hostAt(joinedOnto, 95000)],
+  ["9:0", "9:0", "9:0", "1", "2"]);
+check("  the stream they came in on, noted with the join, is theirs",
+  streamAt([by("joined", "3", 0, { role: "viewer", stream: "2:0" })], streams, "3", 1000)?.decision, "transcode");
+const followerTrack: TrackPoint[] = [[30000, 30, 1], [40000, 40, 1], [50000, 50, 1]];
+check("  so their coverage shows how it reached them, not an unrecorded stream",
+  deliveryParts(followerTrack, joinedOnto, hostOwn, "2"), [{ from: 30, to: 50, decision: "copy" }]);
 
 console.log("\n— live: sync, encoding, logs —");
 check("sync offset, said", [drift(0.3), drift(2.44), drift(-3)], ["in sync", "2.4 s ahead", "3.0 s behind"]);

@@ -9,7 +9,7 @@
  * showed playing (held for the room), then paused for the moment between the
  * room's answer and the element starting, then playing.
  */
-import { INTENT_MAX_MS, INTENT_SETTLE_MS, shownPlaying, type PressIntent } from "../src/lib/pressIntent";
+import { INTENT_MAX_MS, INTENT_SETTLE_MS, pausesAtOnce, shownPlaying, type PressIntent } from "../src/lib/pressIntent";
 
 let pass = 0;
 let fail = 0;
@@ -59,6 +59,13 @@ function run(intent: PressIntent | null, steps: Array<[number, boolean, boolean]
   check("no press: the element decides", shownPlaying(null, false, false, t0), false);
   check("no press: held for the room shows playing", shownPlaying(null, false, true, t0), true);
 }
+
+// 18 November, 18:53 UTC: a co-host's pause stopped its picture 290 ms before
+// the host's, and its resume started it with the host's; its sync offset went
+// from -1.29 s to -1.62 s, a round trip at every pause and resume.
+check("the host's pause stops its picture at once", pausesAtOnce(true, true), true);
+check("a co-host's pause waits for the room's answer, as its play does", pausesAtOnce(false, true), false);
+check("a player on its own stops at once", pausesAtOnce(false, false), true);
 
 console.log(`press-intent: ${pass} passed, ${fail} failed`);
 if (fail) process.exit(1);

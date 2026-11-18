@@ -82,17 +82,33 @@ export function loadTimes(events: PlayEvent[], userId: string | null): { start: 
   return { start: stats(ms("loaded at start")), seek: stats(ms("loaded after seek")) };
 }
 
+/** Who was host at a time: whoever started the title as host, joined or came back as host, or was made host by then. */
+export function hostAt(events: PlayEvent[], t: number): string | null {
+  let host: string | null = null;
+  for (const e of events) {
+    if (e.at > t) break;
+    if (!e.userId) continue;
+    const to = e.kind === "role" ? e.detail?.to : e.kind === "play" || e.kind === "joined" || e.kind === "came back" ? e.detail?.role : undefined;
+    if (to === "host") host = e.userId;
+    else if (to !== undefined && host === e.userId) host = null;
+  }
+  return host;
+}
+
 /**
- * The stream a viewer was on at a time: the one they last moved onto by
- * then; before any move, or with none recorded, their own stream, else the
- * one the room shared. A stream's later restarts share its key: the one
- * running then.
+ * The stream a viewer was on at a time: the one they last moved onto, or
+ * joined on, by then. With none recorded (one who joined onto the host's
+ * stream before joins noted it), their own stream, else the one the host was
+ * on, else the one the room shared, else the one running. A stream's later
+ * restarts share its key: the one running then.
  */
-export function streamAt(events: PlayEvent[], streams: PlayStream[], userId: string, t: number): PlayStream | null {
+export function streamAt(events: PlayEvent[], streams: PlayStream[], userId: string, t: number, viaHost = true): PlayStream | null {
   let key: string | null = null;
   for (const e of events) {
     if (e.at > t) break;
-    if (e.userId === userId && e.kind === "stream changed" && typeof e.detail?.to === "string") key = e.detail.to;
+    if (e.userId !== userId) continue;
+    if (e.kind === "stream changed" && typeof e.detail?.to === "string") key = e.detail.to;
+    else if ((e.kind === "joined" || e.kind === "came back") && typeof e.detail?.stream === "string") key = e.detail.stream;
   }
   const running = (s: PlayStream) => s.startedAt <= t && (s.endedAt === null || s.endedAt >= t);
   if (key !== null) {
@@ -100,8 +116,10 @@ export function streamAt(events: PlayEvent[], streams: PlayStream[], userId: str
     return same.find(running) ?? same.filter((s) => s.startedAt <= t).at(-1) ?? same[0] ?? null;
   }
   const own = streams.filter((s) => s.ownerUserId === userId);
+  const host = viaHost ? hostAt(events, t) : null;
+  const hosts = host && host !== userId ? streamAt(events, streams, host, t, false) : null;
   const shared = streams.filter((s) => !s.ownerUserId);
-  return own.find(running) ?? shared.find(running) ?? own[0] ?? shared[0] ?? null;
+  return own.find(running) ?? hosts ?? shared.find(running) ?? streams.find(running) ?? own[0] ?? shared[0] ?? null;
 }
 
 export interface DeliveryPart { from: number; to: number; decision: "copy" | "transcode" | null }

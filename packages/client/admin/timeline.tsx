@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { HealthPoint, PlayDetail, PlayEvent, ProcessingStep, TrackPoint } from "./types";
-import { clock, quality, shortTime, timeOfDay } from "./format";
+import { clock, quality, seconds, shortTime, timeOfDay } from "./format";
 import { decisionOf, reasonText } from "./parts";
 import {
   eventText, finishedAt, jumpsOf, newestFirst, positionAt, positionTicks, streamDiff, streamLabel, switchedText, trackName, unionParts, type EventContext,
@@ -110,6 +110,10 @@ function linePath(points: Array<[number, number | null]>, x: (t: number) => numb
   return d;
 }
 
+/** The most a player holds ahead: the peer-to-peer engine fetches 150 seconds ahead (Player.tsx, lib/bufferAhead). */
+const BUFFER_TOP_S = 150;
+const BUFFER_LEVELS = [0, 30, 60, 90, 120, 150];
+
 /** A rounded top for a measure's scale: 1, 2, 2.5 or 5 times a power of ten. */
 function niceTop(v: number): number {
   if (!(v > 0)) return 1;
@@ -117,7 +121,18 @@ function niceTop(v: number): number {
   return ([1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10].find((m) => m * p >= v) ?? 10) * p;
 }
 
-interface Hover { t: number; x: number; y: number; h: number; touch: boolean }
+interface Hover {
+  t: number; x: number; y: number; h: number; touch: boolean;
+  /** Where the pointer is on screen, and the bottom of the bars stuck to the top of it: the readout stays between them and the screen's foot. */
+  vy: number; clear: number;
+}
+
+/** The bottom of whatever is stuck to the top of the screen: the top bar on a tablet, the section bar once it sticks. */
+function stuckBottom(): number {
+  const bars = [...document.querySelectorAll(".sidebar, .section-nav")].map((el) => el.getBoundingClientRect())
+    .filter((r) => r.top <= 1 && r.height < window.innerHeight / 2);
+  return Math.max(0, ...bars.map((r) => r.bottom));
+}
 
 interface ViewerLane {
   userId: string;
@@ -150,6 +165,13 @@ export function SessionTimeline({ data, durationS, ctx, live = false }: {
   const [range, setRange] = useState<Range>(() => (live && endAll - startAll > 30 * MIN * 1.25 ? "30" : "all"));
   const [eachViewer, setEachViewer] = useState(false);
   const [hover, setHover] = useState<Hover | null>(null);
+  // The readout's height, for keeping it on screen.
+  const tipRef = useRef<HTMLDivElement>(null);
+  const [tipH, setTipH] = useState(0);
+  useLayoutEffect(() => {
+    const h = tipRef.current?.offsetHeight ?? 0;
+    if (h && h !== tipH) setTipH(h);
+  });
   const win = offered.find((r) => r.key === range) ?? RANGES[0];
   const w0 = win.ms === Infinity ? startAll : Math.max(startAll, endAll - win.ms);
   const w1 = Math.max(w0 + 1000, endAll);
@@ -205,7 +227,8 @@ export function SessionTimeline({ data, durationS, ctx, live = false }: {
     const left = box.left + labelW + gapW;
     const f = (e.clientX - left) / trackW;
     if (f < 0 || f > 1) { if (e.pointerType !== "touch") setHover(null); return; }
-    setHover({ t: w0 + (w1 - w0) * f, x: e.clientX - left, y: e.clientY - box.top, h: box.height, touch: e.pointerType === "touch" });
+    setHover({ t: w0 + (w1 - w0) * f, x: e.clientX - left, y: e.clientY - box.top, h: box.height, touch: e.pointerType === "touch",
+      vy: e.clientY, clear: stuckBottom() });
   };
 
   const grid = (h: number) => ticks.map((t) => <line key={t} className="tl-grid" x1={x(t)} x2={x(t)} y1={0} y2={h} />);
@@ -361,26 +384,34 @@ export function SessionTimeline({ data, durationS, ctx, live = false }: {
   }
 
   const metricRow = (key: string, name: string, sub: string, lines: Array<{ userId: string; color: string; points: Array<[number, number | null]> }>,
-    opts: { symmetric?: boolean; band?: number; threshold?: number; floor: number; fmt: (v: number) => string; cap?: number }) => {
+    opts: {
+      symmetric?: boolean; band?: number; threshold?: number; floor: number; fmt: (v: number) => string; cap?: number;
+      /** A fixed scale, its values marked with a line and a label each, on a lane this tall. */
+      top?: number; levels?: number[]; height?: number;
+    }) => {
+    const H = opts.height ?? METRIC;
     const values = lines.flatMap((l) => l.points.filter((p) => inView(p[0])).map((p) => p[1]).filter((v): v is number => v !== null));
     const most = Math.max(opts.floor, ...values.map((v) => (opts.symmetric ? Math.abs(v) : v)));
-    const top = niceTop(Math.min(opts.cap ?? Infinity, most * 1.1));
+    const top = opts.top ?? niceTop(Math.min(opts.cap ?? Infinity, most * 1.1));
     const lo = opts.symmetric ? -top : 0;
     const y = (v: number) => {
       const c = Math.max(lo, Math.min(top, v));
-      return 3 + (1 - (c - lo) / (top - lo)) * (METRIC - 6);
+      return 3 + (1 - (c - lo) / (top - lo)) * (H - 6);
     };
     return (
-      <Row name={name} sub={sub} height={METRIC} key={key} className="tl-metric">
-        <svg className="tl-svg" width={trackW} height={METRIC} aria-hidden="true">
-          <rect className="tl-plot-bg" x={0} y={0} width={trackW} height={METRIC} rx={6} />
-          {grid(METRIC)}
+      <Row name={name} sub={sub} height={H} key={key} className={`tl-metric${opts.levels ? " tl-scaled" : ""}`}>
+        <svg className="tl-svg" width={trackW} height={H} aria-hidden="true">
+          <rect className="tl-plot-bg" x={0} y={0} width={trackW} height={H} rx={6} />
+          {grid(H)}
+          {opts.levels?.map((v) => <line key={`l${v}`} className="tl-hgrid" x1={0} x2={trackW} y1={y(v)} y2={y(v)} />)}
           {opts.band !== undefined && <rect className="tl-band" x={0} width={trackW} y={y(opts.band)} height={Math.max(0, y(-opts.band) - y(opts.band))} />}
           {opts.symmetric && <line className="tl-zero" x1={0} x2={trackW} y1={y(0)} y2={y(0)} />}
           {opts.threshold !== undefined && <line className="tl-threshold" x1={0} x2={trackW} y1={y(opts.threshold)} y2={y(opts.threshold)} />}
           {lines.map((l) => <path key={l.userId} className="tl-line" d={linePath(l.points, x, y)} style={{ stroke: l.color }} />)}
         </svg>
-        <span className="tl-scale">{opts.symmetric ? `±${opts.fmt(top)}` : opts.fmt(top)}</span>
+        {opts.levels
+          ? opts.levels.map((v) => <span key={v} className="tl-ytick" style={{ top: y(v) }}>{opts.fmt(v)}</span>)
+          : <span className="tl-scale">{opts.symmetric ? `±${opts.fmt(top)}` : opts.fmt(top)}</span>}
       </Row>
     );
   };
@@ -389,8 +420,8 @@ export function SessionTimeline({ data, durationS, ctx, live = false }: {
     dataRow,
     syncLines.length > 0 && metricRow("sync", "Sync offset", "Tolerance ±2 s", syncLines,
       { symmetric: true, band: 2, floor: 3, cap: 30, fmt: (v) => `${v} s` }),
-    bufferLines.length > 0 && metricRow("buffer", "Forward buffer", "Low below 10 s", bufferLines,
-      { threshold: 10, floor: 30, cap: 600, fmt: (v) => clock(v) }),
+    bufferLines.length > 0 && metricRow("buffer", "Buffer", "Low below 10 s", bufferLines,
+      { threshold: 10, floor: 30, top: BUFFER_TOP_S, levels: BUFFER_LEVELS, height: narrow ? 92 : 110, fmt: seconds }),
     dropLines.length > 0 && metricRow("frames", "Dropped frames",
       `${dropLines.reduce((s, l) => s + l.points.reduce((a, p) => a + (p[1] ?? 0), 0), 0)} in total`, dropLines,
       { floor: 5, fmt: (v) => `${v}` }),
@@ -405,59 +436,124 @@ export function SessionTimeline({ data, durationS, ctx, live = false }: {
     const dp = delivery.points.reduce<(typeof delivery.points)[number] | null>((b, p) => (!b || Math.abs(p[0] - t) < Math.abs(b[0] - t) ? p : b), null);
     const dpNear = dp && Math.abs(dp[0] - t) <= Math.max(delivery.stepMs, 10_000) ? dp : null;
     const running = streams.map((s, i) => ({ s, i })).filter(({ s }) => s.startedAt <= t && (s.endedAt ?? endAll) >= t);
+    const dropped = dropLines.length > 0;
     return (
       <>
-        <div className="tl-tip-head">
-          <strong>{timeOfDay(t)}</strong>
-          {pos !== null && <span className="muted">Position {clock(pos)} of {clock(length)}</span>}
-        </div>
-        <dl className="tl-tip-grid">
-          <dt>Playback</dt>
-          <dd>{pb ? `${PLAYBACK_LABEL[pb.state]}${pb.state !== "waiting" && pb.by ? `, ${pb.state === "paused" ? "paused" : "started"} by ${pb.by}` : ""}` : "Stopped"}</dd>
-          {running.map(({ s, i }) => (
-            <PairRow key={s.id} k={`Stream ${i + 1}`} v={`${decisionOf(s).label}${s.reason && s.decision === "transcode" ? ` · ${reasonText(s.reason)}` : ""}`} />
-          ))}
-          {dpNear && <PairRow k="Data" v={SOURCES.map((src, i) => `${src.label} ${bps(dpNear[i + 1])}`).join(" · ")} />}
-        </dl>
-        <table className="tl-tip-viewers">
-          <thead><tr><th>Viewer</th><th>Status</th>{streams.length > 1 && <th className="num">Stream</th>}<th className="num">Sync</th><th className="num">Buffer</th>{dropLines.length > 0 && <th className="num">Dropped</th>}</tr></thead>
-          <tbody>
-            {lanes.map((l) => {
+        <div className="tl-tip-head"><strong>{timeOfDay(t)}</strong></div>
+        <section className="tl-tip-sec">
+          <h5>Session</h5>
+          <dl className="tl-tip-grid">
+            <dt>Playback</dt>
+            <dd>{pb ? `${PLAYBACK_LABEL[pb.state]}${pb.state !== "waiting" && pb.by ? `, ${pb.state === "paused" ? "paused" : "started"} by ${pb.by}` : ""}` : "Stopped"}</dd>
+            {pos !== null && <PairRow k="Position" v={`${clock(pos)} of ${clock(length)}`} />}
+          </dl>
+        </section>
+        {running.length > 0 && (
+          <section className="tl-tip-sec">
+            <h5>Streams</h5>
+            <dl className="tl-tip-grid">
+              {running.map(({ s, i }) => (
+                <PairRow key={s.id} k={`Stream ${i + 1}`} v={`${decisionOf(s).label}${s.reason && s.decision === "transcode" ? ` · ${reasonText(s.reason)}` : ""}`} />
+              ))}
+            </dl>
+          </section>
+        )}
+        {dpNear && (
+          <section className="tl-tip-sec">
+            <h5>Data delivered</h5>
+            <ul className="tl-tip-data">
+              {SOURCES.map((src, i) => <li key={src.key}><span className="tl-key" style={{ background: src.color }} />{src.label} <strong>{bps(dpNear[i + 1])}</strong></li>)}
+            </ul>
+          </section>
+        )}
+        <section className="tl-tip-sec">
+          <h5>Viewers</h5>
+          {(() => {
+            const rows = lanes.map((l) => {
               const role = l.roles.find((r) => r.from <= t && t <= r.to)?.role;
               const st = l.status.find((s2) => s2.from <= t && t <= s2.to);
               const h = sampleAt(l.health, t);
               const s = role ? streamAt(events, streams, l.userId, t) : null;
-              const statusText = !role ? "Not in the session" : st ? st.what : pb?.state === "paused" ? "Paused" : pb ? "Watching" : "Idle";
+              return {
+                l, role: role ? ROLE_LABEL[role] : null,
+                status: !role ? "Not in the session" : st ? st.what : pb?.state === "paused" ? "Paused" : pb ? "Watching" : "Idle",
+                stream: s ? String(streams.indexOf(s) + 1) : "—",
+                sync: h && typeof h[1] === "number" ? offsetText(h[1]) : "—",
+                buffer: h && typeof h[2] === "number" ? seconds(h[2]) : "—",
+                dropped: h && typeof h[9] === "number" ? String(h[9]) : "—",
+              };
+            });
+            // A phone: each viewer on two lines, as a table's columns would not fit.
+            if (narrow) {
               return (
-                <tr key={l.userId} className={role ? "" : "muted"}>
-                  <td><span className="tl-chip" style={{ background: l.color }} />{l.name}
-                    {role && role !== "viewer" && <span className="muted"> · {ROLE_LABEL[role]}</span>}</td>
-                  <td>{statusText}</td>
-                  {streams.length > 1 && <td className="num">{s ? streams.indexOf(s) + 1 : "—"}</td>}
-                  <td className="num">{h && typeof h[1] === "number" ? offsetText(h[1]) : "—"}</td>
-                  <td className="num">{h && typeof h[2] === "number" ? clock(h[2]) : "—"}</td>
-                  {dropLines.length > 0 && <td className="num">{h && typeof h[9] === "number" ? h[9] : "—"}</td>}
-                </tr>
+                <ul className="tl-tip-people">
+                  {rows.map((r) => (
+                    <li key={r.l.userId} className={r.role ? "" : "muted"}>
+                      <div className="tl-tip-person"><span className="tl-chip" style={{ background: r.l.color }} />
+                        <span className="tl-tip-name">{r.l.name}</span>{r.role && <span className="muted">{r.role}</span>}</div>
+                      <div className="tl-tip-figs">
+                        {[r.status, streams.length > 1 ? `Stream ${r.stream}` : null, `Sync ${r.sync}`, `Buffer ${r.buffer}`, dropped ? `Dropped ${r.dropped}` : null]
+                          .filter(Boolean).join(" · ")}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
               );
-            })}
-          </tbody>
-        </table>
+            }
+            return (
+              <table className="tl-tip-viewers">
+                <thead>
+                  <tr>
+                    <th className="c-name">Viewer</th><th className="c-role">Role</th><th>Status</th>
+                    {streams.length > 1 && <th className="num c-stream">Stream</th>}
+                    <th className="num">Sync</th><th className="num">Buffer</th>{dropped && <th className="num">Dropped</th>}
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((r) => (
+                    <tr key={r.l.userId} className={r.role ? "" : "muted"}>
+                      <td className="c-name" title={r.l.name}><span className="tl-chip" style={{ background: r.l.color }} />{r.l.name}</td>
+                      <td className="c-role">{r.role ?? "—"}</td>
+                      <td>{r.status}</td>
+                      {streams.length > 1 && <td className="num">{r.stream}</td>}
+                      <td className="num">{r.sync}</td>
+                      <td className="num">{r.buffer}</td>
+                      {dropped && <td className="num">{r.dropped}</td>}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            );
+          })()}
+        </section>
         {(near.length > 0 || nearSteps.length > 0) && (
-          <ul className="tl-tip-events">
-            {near.map((e) => <li key={e.id}><span className="mono muted">{shortTime(e.at)}</span> {eventText(e, ctx)}</li>)}
-            {nearSteps.map((s2) => <li key={`p${s2.id}`}><span className="mono muted">{shortTime(s2.at)}</span> {stepText(s2)}</li>)}
-          </ul>
+          <section className="tl-tip-sec">
+            <h5>Events</h5>
+            <ul className="tl-tip-events">
+              {near.map((e) => <li key={e.id}><span className="mono muted">{shortTime(e.at)}</span> {eventText(e, ctx)}</li>)}
+              {nearSteps.map((s2) => <li key={`p${s2.id}`}><span className="mono muted">{shortTime(s2.at)}</span> {stepText(s2)}</li>)}
+            </ul>
+          </section>
         )}
       </>
     );
   };
 
-  const TIP_W = 440;
+  const TIP_W = Math.min(500, Math.max(320, width - 16));
   const tipLeft = hover ? (() => {
     const right = labelW + gapW + hover.x + 14;
     return right + TIP_W <= width ? right : Math.max(0, labelW + gapW + hover.x - 14 - TIP_W);
   })() : 0;
-  const below = hover ? hover.y < hover.h / 2 : true;
+  // Below the pointer where it fits on screen, else above; never under the bars stuck at the top nor past the foot.
+  const tipTop = hover ? (() => {
+    const room = window.innerHeight;
+    const lanesTop = hover.vy - hover.y;
+    const fitsBelow = hover.vy + 14 + tipH <= room - 8;
+    const fitsAbove = hover.vy - 14 - tipH >= hover.clear + 8;
+    const top = fitsBelow || (!fitsAbove && hover.vy < room / 2) ? hover.y + 14 : hover.y - 14 - tipH;
+    const min = hover.clear + 8 - lanesTop;
+    return Math.max(min, Math.min(top, room - 8 - tipH - lanesTop));
+  })() : 0;
 
   // ── The key under the chart: only what it shows ──
   const decisions = new Set(streams.map((s) => decisionOf(s).tone));
@@ -465,6 +561,39 @@ export function SessionTimeline({ data, durationS, ctx, live = false }: {
   const statusKinds = new Set(lanes.flatMap((l) => l.status.map((s) => s.state)));
   const anyMarks = lanes.some((l) => l.marks.some((e) => e.kind !== "player error"));
   const anyErrors = events.some((e) => e.kind === "player error");
+  const keyRow = (k: string, children: React.ReactNode) => (
+    <div className="tl-row tl-key-row" key={k}><div className="tl-label" /><ul className="tl-key-group">{children}</ul></div>
+  );
+  const linesOf = (ls: ViewerLane[]) => ls.map((l) => <li key={l.userId}><span className="tl-key line" style={{ background: l.color }} />{l.name}</li>);
+  const playbackKey = keyRow("k-playback", <>
+    <Key cls="good" text="Playing" /><Key cls="paused" text="Paused" />
+    {playback.some((s) => s.state === "waiting") && <Key cls="warn" text="Waiting for host" />}
+    {hasTrack && jumps.length > 0 && <Key cls="seek" text="Seek" />}
+    {hasTrack && problems.some((e) => e.kind === "buffering") && <Key cls="stall" text="Buffering" />}
+    {hasTrack && problems.some((e) => e.kind === "player error") && <Key cls="error" text="Player error" />}
+    {hasTrack && eachViewer && linesOf(ownTracks)}
+  </>);
+  const streamsKey = streams.length > 0 && keyRow("k-streams", <>
+    {decisions.has("good") && <Key cls="good" text="Direct play / direct stream" />}
+    {decisions.has("warn") && <Key cls="warn" text="Transcode" />}
+    {events.some((e) => e.kind === "stream restarted") && <Key cls="restart" text="Stream restarted" />}
+    {steps.some((s) => s.hlsSessionId) && <Key cls="tick" text="Processing step" />}
+  </>);
+  const viewersKey = lanes.length > 0 && keyRow("k-viewers", <>
+    {roleKinds.has("host") && <Key cls="role-host" text="Host" />}
+    {roleKinds.has("co-host") && <Key cls="role-cohost" text="Co-host" />}
+    {roleKinds.has("viewer") && <Key cls="role-viewer" text="Viewer" />}
+    {statusKinds.has("buffering") && <Key cls="buffering" text="Buffering" />}
+    {statusKinds.has("loading") && <Key cls="loading" text="Loading" />}
+    {statusKinds.has("away") && <Key cls="away" text="Away from Discord" />}
+    {anyMarks && <Key cls="event" text="Change or request" />}
+    {anyErrors && <Key cls="error" text="Player error" />}
+  </>);
+  const healthLines = lanes.filter((l) => [syncLines, bufferLines, dropLines].some((ls) => ls.some((m) => m.userId === l.userId)));
+  const healthKey = healthRows.length > 0 && keyRow("k-health", <>
+    {delivery.points.length > 1 && SOURCES.map((s) => <li key={s.key}><span className="tl-key" style={{ background: s.color }} />{s.label}</li>)}
+    {linesOf(healthLines)}
+  </>);
 
   return (
     <div className={`tl${narrow ? " narrow" : ""}`} ref={ref} style={{ ["--tl-label" as string]: `${labelW}px`, ["--tl-gap" as string]: `${gapW}px` }}>
@@ -487,15 +616,19 @@ export function SessionTimeline({ data, durationS, ctx, live = false }: {
         onPointerMove={onMove} onPointerDown={onMove} onPointerLeave={(e) => { if (e.pointerType !== "touch") setHover(null); }}>
         {playbackRow}
         {positionRow}
+        {playbackKey}
         {streamRows.length > 0 && <div className="tl-section">Streams</div>}
         {streamRows}
+        {streamsKey}
         {viewerRows.length > 0 && <div className="tl-section">Viewers</div>}
         {viewerRows}
+        {viewersKey}
         {healthRows.length > 0 && <div className="tl-section">Delivery and player health</div>}
         {healthRows}
+        {healthKey}
         {hover && <span className="tl-hover-line" style={{ left: labelW + gapW + hover.x }} />}
         {hover && !narrow && (
-          <div className={`tl-tip${below ? "" : " above"}`} style={{ left: tipLeft, top: below ? hover.y + 14 : hover.y - 14, width: TIP_W }}>
+          <div className="tl-tip" ref={tipRef} style={{ left: tipLeft, top: tipTop, width: TIP_W }}>
             {readout(hover.t)}
           </div>
         )}
@@ -511,44 +644,6 @@ export function SessionTimeline({ data, durationS, ctx, live = false }: {
         </div>
       </div>
       {hover && narrow && <div className="tl-tip docked">{readout(hover.t)}</div>}
-      <div className="tl-legend">
-        <KeyGroup name="Playback">
-          <Key cls="good" text="Playing" /><Key cls="paused" text="Paused" />
-          {playback.some((s) => s.state === "waiting") && <Key cls="warn" text="Waiting for host" />}
-          {jumps.length > 0 && <Key cls="seek" text="Seek" />}
-        </KeyGroup>
-        {streams.length > 0 && (
-          <KeyGroup name="Streams">
-            {decisions.has("good") && <Key cls="good" text="Direct play / direct stream" />}
-            {decisions.has("warn") && <Key cls="warn" text="Transcode" />}
-            {steps.some((s) => s.hlsSessionId) && <Key cls="tick" text="Processing step" />}
-          </KeyGroup>
-        )}
-        {lanes.length > 0 && (
-          <KeyGroup name="Viewers">
-            {roleKinds.has("host") && <Key cls="role-host" text="Host" />}
-            {roleKinds.has("co-host") && <Key cls="role-cohost" text="Co-host" />}
-            {roleKinds.has("viewer") && <Key cls="role-viewer" text="Viewer" />}
-            {statusKinds.has("buffering") && <Key cls="buffering" text="Buffering" />}
-            {statusKinds.has("loading") && <Key cls="loading" text="Loading" />}
-            {statusKinds.has("away") && <Key cls="away" text="Away from Discord" />}
-            {anyMarks && <Key cls="event" text="Change or request" />}
-            {anyErrors && <Key cls="error" text="Player error" />}
-          </KeyGroup>
-        )}
-        {delivery.points.length > 1 && (
-          <KeyGroup name="Data">
-            {SOURCES.map((s) => <li key={s.key}><span className="tl-key" style={{ background: s.color }} />{s.label}</li>)}
-          </KeyGroup>
-        )}
-        {(syncLines.length > 0 || bufferLines.length > 0 || (eachViewer && ownTracks.length > 0)) && (
-          <KeyGroup name="Viewer lines">
-            {lanes.filter((l) => syncLines.some((s) => s.userId === l.userId) || bufferLines.some((b) => b.userId === l.userId)
-              || (eachViewer && ownTracks.includes(l)))
-              .map((l) => <li key={l.userId}><span className="tl-key line" style={{ background: l.color }} />{l.name}</li>)}
-          </KeyGroup>
-        )}
-      </div>
     </div>
   );
 }
@@ -595,8 +690,9 @@ export function Watched({ data, durationS }: { data: PlayDetail; durationS: numb
     && (!userId || e.userId === userId));
   const row = (key: string, name: React.ReactNode, parts: Array<[number, number]>, marks: PlayEvent[], how: DeliveryPart[] | null = null) => {
     const seen = parts.reduce((s, [a, b]) => s + (b - a), 0);
-    const segs = how ? how.map((p) => ({ from: p.from, to: p.to, cls: p.decision === "transcode" ? "warn" : p.decision === "copy" ? "good" : "watched" }))
-      : parts.map(([a, b]) => ({ from: a, to: b, cls: "watched" }));
+    const unknown = anyDelivery ? "unknown" : "watched";
+    const segs = how ? how.map((p) => ({ from: p.from, to: p.to, cls: p.decision === "transcode" ? "warn" : p.decision === "copy" ? "good" : unknown }))
+      : parts.map(([a, b]) => ({ from: a, to: b, cls: key === "all" ? "union" : unknown }));
     return (
       <Row key={key} name={name} sub={`${clock(seen)} watched · ${Math.round((seen / length) * 100)}%`} height={22}>
         {segs.map((s, i) => <span key={i} className={`tl-seg ${s.cls}`} style={{ left: x(s.from), width: Math.max(2, x(s.to) - x(s.from)) }} />)}
@@ -654,9 +750,11 @@ export function Watched({ data, durationS }: { data: PlayDetail; durationS: numb
       </div>
       <div className="tl-legend">
         <KeyGroup name="Watched">
-          {(!anyDelivery || ways.has(null) || ways.has(undefined)) && <Key cls="watched" text={anyDelivery ? "Stream not recorded" : "Watched"} />}
+          {data.viewers.length > 1 && <Key cls="union" text="Any viewer" />}
+          {!anyDelivery && <Key cls="watched" text="Watched" />}
           {ways.has("copy") && <Key cls="good" text="Direct play / direct stream" />}
           {ways.has("transcode") && <Key cls="warn" text="Transcode" />}
+          {anyDelivery && (ways.has(null) || ways.has(undefined)) && <Key cls="unknown" text="Delivery method not recorded" />}
           {jumps.length > 0 && <Key cls="seek" text="Seek" />}
           <Key cls="stall" text="Buffering" />
           <Key cls="error" text="Player error" />

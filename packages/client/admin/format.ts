@@ -67,6 +67,11 @@ export function duration(ms: number): string {
   return clock(Math.round(ms / 1000));
 }
 
+/** A buffer in whole seconds, however long: "149 s", never "2:29". */
+export function seconds(s: number): string {
+  return `${Math.round(s)} s`;
+}
+
 /** 6:36:04 PM, local time. */
 export function timeOfDay(at: number | string | null | undefined): string {
   if (at === null || at === undefined) return "—";

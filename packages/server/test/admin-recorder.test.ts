@@ -791,7 +791,8 @@ console.log("\n— which client each viewer is on —");
     .map((e) => { const d = (e.detail ?? {}) as Any; return [e.kind, name(d.device), name(d.from), name(d.to)]; });
   wStep(2_000);
   const joined = wr.play(wid)!.events.find((e) => e.userId === "922" && e.kind === "joined")?.detail as Any | undefined;
-  check("joining: on which client, and what its player plays", [name(joined?.device), joined?.caps, joined?.av1Encode], ["desk", ["hevc"], true]);
+  check("joining: on which client, what its player plays, and the stream they come in on (the host's, no move recorded)",
+    [name(joined?.device), joined?.caps, joined?.av1Encode, joined?.stream], ["desk", ["hevc"], true, "v0"]);
   (rw.clients as Any[])[1] = client("922", "mover", { device: PHONE });
   wStep(2_000);
   wStep(2_000);

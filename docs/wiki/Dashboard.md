@@ -94,7 +94,7 @@ are active.
    peers), and buffering in green, amber or red.
 3. **Viewers.** Each viewer's role and client (the Discord desktop app, the
    Discord app on a phone, Vesktop, or a browser, with the operating system),
-   status, stream, sync offset from the session position, forward buffer
+   status, stream, sync offset from the session position, buffer in seconds
    with its trend (amber under 10 seconds), watch time, data received with
    its split, data sent to peers, and buffering. Status is the player's last
    report: watching, loading (at the start or after a seek), buffering and
@@ -160,9 +160,9 @@ figures:
 | Section | Shows |
 |---|---|
 | Session timeline | See [Session timeline](#session-timeline) below. |
-| Viewers | Each viewer's role and client, the streams they were on, watch time, data received, data sent to peers, buffering, pauses, loading times and time away from Discord. Select a viewer for their details in four groups. **User and client:** Discord user ID, when they were first and last seen, their roles over the session and when each began, and each client they watched on with the formats it can play (a viewer who moved from their computer to their phone shows both). **Playback:** loading at the start and after seeks, time away from Discord, and each pause. **Player health:** from the player's reports every 10 seconds, the sync offset (average and largest; none for the host, whom the session follows), the forward buffer and the media element buffer (average and lowest), frames dropped out of frames rendered, the playback rate range while correcting sync, the most peers at once, and the player's peak memory. **Data:** received from the server, Discord's cache and other viewers, and sent to other viewers. A host is in the room before they choose a title, so what they joined on and as is taken from just before the session. |
+| Viewers | Each viewer's role and client, the streams they were on, watch time, data received, data sent to peers, buffering, pauses, loading times and time away from Discord. Select a viewer for their details in four groups. **User and client:** Discord user ID, when they were first and last seen, their roles over the session and when each began, and each client they watched on with the formats it can play (a viewer who moved from their computer to their phone shows both). **Playback:** loading at the start and after seeks, time away from Discord, and each pause. **Player health:** from the player's reports every 10 seconds, the sync offset (average and largest; none for the host, whom the session follows), the buffer and the media element buffer in seconds (average and lowest), frames dropped out of frames rendered, the playback rate range while correcting sync, the most peers at once, and the player's peak memory. **Data:** received from the server, Discord's cache and other viewers, and sent to other viewers. A host is in the room before they choose a title, so what they joined on and as is taken from just before the session. |
 | Key moments | The significant events and their causes, newest first: a stream starting and why, the host changing a track and who followed, a viewer changing stream, quality or subtitles, a change of host or co-host and how it happened, Skip Intro and Skip Credits, a stream ending early, long buffering, and errors. This is where to look when a second stream started part way through. |
-| Viewing coverage | One bar per viewer across the title's runtime, and one for all viewers: the portions they watched, with buffering (a red bar) and player errors (a red diamond) where they happened in the title. For sessions recorded from this version on, each viewer's portions are coloured by how the video reached them: green for direct play or direct stream, amber for transcode. Above them, a Seeks row draws each seek as an arc from where it left to where it landed, labelled as on the position line, and a tick where the title finished. |
+| Viewing coverage | One bar per viewer across the title's runtime, and one for all viewers: the portions they watched, with buffering (a red bar) and player errors (a red diamond) where they happened in the title. For sessions recorded from this version on, each viewer's portions are coloured by how the video reached them: green for direct play or direct stream, amber for transcode. A viewer who joined onto the host's stream is shown on the stream the host was on; striped grey marks a portion whose delivery method was not recorded. The all-viewers bar is grey. Above them, a Seeks row draws each seek as an arc from where it left to where it landed, labelled as on the position line, and a tick where the title finished. |
 | Streams | Each stream, as on Activity |
 | Media processing | How long the server took to prepare the title and its streams. **Startup** totals file analysis, stream setup and the first segment; each of those has its own figure. Below, every step with its time, the stream it applies to, its duration, its result and its details: file analysis (reading the file's video, audio and subtitle tracks), stream setup (from the stream request to FFmpeg running), first segment (from FFmpeg start to the first playable segment, as a remux or a transcode), full-file remux or transcode (through to the end of the file), subtitle extraction (a whole track, or the lines around the current position), image subtitle conversion (PGS), external subtitle loading, seek preview generation, and a stream that stopped with an error. |
 | Peer-to-peer sharing | Video data relayed from one viewer's player to another, by sender and receiver, largest first |
@@ -195,14 +195,19 @@ cause in another. For a long session, **Whole session**, **Last 30 min** and
   loading and time away from Discord marked on the row.
 - **Delivery and player health:** the data delivered to the players by
   source (server, Discord cache, peers), each viewer's sync offset with the
-  ±2 second tolerance, each viewer's forward buffer with the 10 second low
-  mark, and dropped frames.
+  ±2 second tolerance, each viewer's buffer on a fixed scale of 0 to 150
+  seconds (the most a player fetches ahead) with a line every 30 seconds and
+  the 10 second low mark, and dropped frames.
+
+Each section's colour key is under its own rows.
 
 Hover over or tap the chart for a line across every row and the values at
-that moment: playback, the position, each stream, and for each viewer their
-role, status, stream, sync offset, forward buffer and dropped frames. Hover
-any bar, line or mark for its details. Where labels would overlap, as on a
-phone, some are left to their mark's hover.
+that moment, in sections: **Session** (playback and the position),
+**Streams**, **Data delivered** by source, **Viewers** (each viewer's role,
+status, stream, sync offset, buffer and dropped frames) and **Events** near
+that moment. On a phone the readout sits under the chart, each viewer on two
+lines. Hover any bar, line or mark for its details. Where labels would
+overlap, as on a phone, some are left to their mark's hover.
 
 ## Statistics
 
@@ -286,7 +291,9 @@ co-host and viewer. The sections follow in this order:
 
 Watch time per day by server. Then each Discord server the Activity was used
 in, and each of its channels: launches, joins, users, sessions and time
-played. Below, every launch and join, newest first.
+played. A channel's users show by name, most recent first; past ten, the
+first eight show with **Show all**. On a phone each channel is a card with its
+users across the full width. Below, every launch and join, newest first.
 
 Servers and channels show by name, here and on every page. A server's name is
 learned when someone opens the Activity in it, and a channel's when the
@@ -366,7 +373,7 @@ folder:
 - **Where in the title:** the session position, and each player's, every 10
   seconds.
 - **Player health:** each player's report every 10 seconds: sync offset,
-  forward buffer, media element buffer, frames rendered and dropped, data by
+  buffer, media element buffer, frames rendered and dropped, data by
   source, peers, playback rate and memory.
 - **Usage:** each launch of the Activity and each person joining a room.
 - **Upload:** what the server's port sent, each minute, with how many were

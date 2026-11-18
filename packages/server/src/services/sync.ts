@@ -3238,8 +3238,13 @@ export function attachWebSocketServer(server: Server): void {
           break;
         }
         case "pause": {
+          // Where the room is as the command arrives, read before the transport
+          // changes: a co-host's is the room's clock, which runs only while the
+          // room plays. Read after, it was the host's last report, up to a
+          // heartbeat behind where the room stood.
+          const pausedAt = positionForCommand(room, client, msg.position);
           setTransport(room, false);
-          room.state.position = positionForCommand(room, client, msg.position);
+          room.state.position = pausedAt;
           // Only the host's pause carries an observed playhead; a co-host's is
           // served from the room's own clock and so confirms nothing.
           if (client.isHost) room.state.positionConfirmed = true;
@@ -3255,8 +3260,15 @@ export function attachWebSocketServer(server: Server): void {
           break;
         }
         case "resume": {
+          // Read while the room is still paused, so a co-host's resume starts
+          // the clock where the pause stopped it. Read after the transport
+          // changed, the clock counted the pause as played: on 18 November at
+          // 18:54 UTC a co-host paused at 384.54 and resumed 3.4 s later, the
+          // room resumed at 387.93, and every player but the host was moved
+          // 3.4 s ahead of it.
+          const resumedAt = positionForCommand(room, client, msg.position);
           setTransport(room, true);
-          room.state.position = positionForCommand(room, client, msg.position);
+          room.state.position = resumedAt;
           if (client.isHost) room.state.positionConfirmed = true;
           room.state.updatedAt = Date.now();
           // The room starts again with the host's picture. A host resuming onto

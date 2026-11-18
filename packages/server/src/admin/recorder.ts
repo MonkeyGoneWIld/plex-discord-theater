@@ -797,6 +797,8 @@ export class Recorder {
         this.event(play, room.id, at, prev ? "came back" : "joined", c.userId, c.username, room.positionS, {
           role: c.role, ...(device ? { device } : {}), caps: c.caps, ...(c.av1Encode ? { av1Encode: true } : {}),
           ...(became ? { why: rw.why } : {}),
+          // The stream they come in on: one who joins onto the host's stream has no move to record.
+          ...(c.variantKey ? { stream: c.variantKey } : {}),
         });
         switched();
         continue;

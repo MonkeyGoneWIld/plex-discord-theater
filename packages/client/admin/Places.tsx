@@ -4,6 +4,7 @@ import type { PlaceGuild, UsageRow } from "./types";
 import { dayTime, hoursMinutes } from "./format";
 import { Downloads, PlaceName, useLoad, Who } from "./parts";
 import { MiniChart } from "./lazy";
+import { Avatar } from "./viz";
 
 const PAGE = 50;
 
@@ -45,8 +46,8 @@ function GuildCard({ g }: { g: PlaceGuild }) {
           <dt>Last active</dt><dd>{dayTime(g.last)}</dd>
         </dl>
       </header>
-      <div className="table-wrap">
-        <table className="table">
+      <div className="table-wrap channel-table">
+        <table className="table wrap-heads">
           <thead>
             <tr><th>Channel</th><th>Launches</th><th>Joins</th><th>Users</th><th>Sessions</th><th>Time played</th><th>First active</th><th>Last active</th></tr>
           </thead>
@@ -56,21 +57,56 @@ function GuildCard({ g }: { g: PlaceGuild }) {
                 <td><PlaceName kind="channel" id={c.channelId} /></td>
                 <td>{c.launches || "—"}</td>
                 <td>{c.joins || "—"}</td>
-                <td className="caps">
-                  {c.names.map((n, i) => <span key={n.userId}>{i > 0 && ", "}<Who id={n.userId} name={n.username} /></span>)}
-                  {c.people > c.names.length && <span className="muted"> and {c.people - c.names.length} more</span>}
-                  {c.people === 0 && "—"}
-                </td>
+                <td className="users-cell"><UserList names={c.names} total={c.people} /></td>
                 <td>{c.plays || "—"}</td>
                 <td className="nowrap">{hoursMinutes(c.playedS)}</td>
-                <td className="nowrap">{dayTime(c.first)}</td>
-                <td className="nowrap">{dayTime(c.last)}</td>
+                <td className="when-cell">{dayTime(c.first)}</td>
+                <td className="when-cell">{dayTime(c.last)}</td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
+      {/* A phone: each channel as a card, its users across the full width rather than in a column scrolled sideways. */}
+      <ul className="channel-cards">
+        {g.channels.map((c) => (
+          <li key={c.channelId ?? "none"}>
+            <div className="channel-name"><PlaceName kind="channel" id={c.channelId} /></div>
+            <div className="muted small">
+              {[`${c.launches} ${c.launches === 1 ? "launch" : "launches"}`, `${c.joins} ${c.joins === 1 ? "join" : "joins"}`,
+                `${c.plays} ${c.plays === 1 ? "session" : "sessions"}`, `${hoursMinutes(c.playedS)} played`].join(" · ")}
+            </div>
+            <div className="muted small">First active {dayTime(c.first)} · Last active {dayTime(c.last)}</div>
+            <UserList names={c.names} total={c.people} />
+          </li>
+        ))}
+      </ul>
     </section>
+  );
+}
+
+/** A channel's users up to this many all show; past it, the first eight, the rest on request. */
+const USERS_ALL_UP_TO = 10;
+const USERS_SHOWN = 8;
+
+/** A channel's users as chips that wrap, most recent first; a long list shortened to its first eight. */
+function UserList({ names, total }: { names: Array<{ userId: string; username: string | null }>; total: number }) {
+  const [all, setAll] = useState(false);
+  if (total === 0) return <>—</>;
+  const shown = all || names.length <= USERS_ALL_UP_TO ? names : names.slice(0, USERS_SHOWN);
+  const hidden = names.length - shown.length;
+  const unlisted = total - names.length;
+  return (
+    <div className="user-list">
+      {shown.map((n) => (
+        <a key={n.userId} className="user-chip" href={`#people/${n.userId}`} title={n.username ?? n.userId}>
+          <Avatar id={n.userId} name={n.username} size={16} /><span>{n.username ?? n.userId}</span>
+        </a>
+      ))}
+      {unlisted > 0 && hidden === 0 && <span className="muted small">and {unlisted} more</span>}
+      {hidden > 0 && <button type="button" className="link" onClick={() => setAll(true)}>Show all {names.length}</button>}
+      {all && names.length > USERS_ALL_UP_TO && <button type="button" className="link" onClick={() => setAll(false)}>Show fewer</button>}
+    </div>
   );
 }
 
@@ -90,12 +126,12 @@ function Launches({ onError }: { onError: (e: unknown) => void }) {
       </div>
       {busy && !data ? <p className="empty">Loading…</p> : rows.length === 0 ? <p className="empty">No launches or joins have been recorded.</p> : (
         <div className="table-wrap">
-          <table className="table">
+          <table className="table wrap-heads">
             <thead><tr><th>Time</th><th>Event</th><th>User</th><th>Discord user ID</th><th>Server</th><th>Channel</th><th>Room</th></tr></thead>
             <tbody>
               {rows.map((u) => (
                 <tr key={u.id}>
-                  <td className="nowrap">{dayTime(u.at)}</td>
+                  <td className="when-cell">{dayTime(u.at)}</td>
                   <td>{kindName(u.kind)}</td>
                   <td><Who id={u.userId} name={u.username} /></td>
                   <td className="mono">{u.userId ?? "—"}</td>

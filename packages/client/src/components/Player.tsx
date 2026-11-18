@@ -49,6 +49,7 @@ import { nudgedRate } from "../lib/softSync";
 import { dropNudge, wantNudge, wantedRate } from "../lib/quietSound";
 import { FIRST_GO_MAX_LEAD_S, HLS_LOOKUP_TOLERANCE_S, heldNothingYet, secondGoLanding,playAskingWhenRefused, LAND_FASTEST_WITHIN_MS, LAND_INTO_SEGMENT_S, LAND_LOOK_AHEAD_S, MAX_WAIT_FOR_ROOM_S, SLOW_SEEK_MS, cameFromCache, catchUpLeadS, keyframeLanding, landingBySize, landingBytesPerS, landingFor, recentSeeksMs, recentSegmentBytesPerS, recentSegmentMs, rememberSeekMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, seekLeadS, seekTimed, seeksSlow, settleForward, transferMs, firstGoLimitS, waitsForRoom, stopIsFirstGo } from "../lib/roomWait";
 import { MAX_START_BACK_S, READY_AHEAD_S, READY_TOLERANCE_S, enoughToStart, landingShortOfEnd, nextSegmentInS, pictureStartFor, pictureAfterSeek } from "../lib/copyStart";
+import { pausesAtOnce } from "../lib/pressIntent";
 import { dropParkedPreview } from "../lib/previewKeep";
 import { LOOK_AHEAD_S, RECENT_STOPS_MS, comingInBytesPerS, readiness, type Readiness } from "../lib/readyCushion";
 import { bufferedRanges, coveredAheadS, forgetEvicted, heldRanges, JOIN_TOLERANCE_S, type HeldSegment } from "../lib/bufferAhead";
@@ -8803,7 +8804,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   // while a skip rebuilds the stream — see hostPositionForRoom.
   const sendPauseForControls = useCallback(() => {
     hostHeldRef.current = false;
-    syncActionsRef.current?.sendPause(hostPositionForRoom());
+    syncActionsRef.current?.sendPause(hostPositionForRoom(), pausesAtOnce(isHostRef.current, true));
   }, [hostPositionForRoom]);
   const sendResumeForControls = useCallback(() => {
     sendRoomResume(hostPositionForRoom());
@@ -8835,8 +8836,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       sendRoomResume(hostPositionForRoom());
     } else {
       hostHeldRef.current = false;
-      video.pause();
-      syncActionsRef.current?.sendPause(hostPositionForRoom());
+      // A co-host's picture stops with the room's answer, as the host's does.
+      const atOnce = pausesAtOnce(isHostRef.current, !!syncActionsRef.current);
+      if (atOnce) video.pause();
+      syncActionsRef.current?.sendPause(hostPositionForRoom(), atOnce);
     }
     // Acknowledge the input. Clicking the picture otherwise gives no feedback
     // until the frame moves, which on a paused-to-playing transition can be
@@ -10184,8 +10187,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                 // outlive the state it was about by a frame or two, and pausing
                 // an already-paused video would broadcast a spurious command.
                 if (video && wantPause && !video.paused) {
-                  video.pause();
-                  syncActions?.sendPause(hostPositionForRoom());
+                  const atOnce = pausesAtOnce(isHostRef.current, !!syncActions);
+                  if (atOnce) video.pause();
+                  syncActions?.sendPause(hostPositionForRoom(), atOnce);
                 } else if (video && !wantPause && video.paused) {
                   void video.play();
                   sendRoomResume(hostPositionForRoom());

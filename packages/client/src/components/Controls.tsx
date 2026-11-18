@@ -9,7 +9,7 @@ import { createPreviewMotion, type SpeedTier } from "../lib/previewMotion";
 import { loadVolume } from "../lib/volume";
 import { previewPassPath, previewVersionOf, rememberPreviewVersion, takePreviewStart } from "../lib/previewPrefetch";
 import { previewKey, sideShare } from "../lib/sideShare";
-import { intentHolds, intentRecheckMs, shownPlaying, type PressIntent } from "../lib/pressIntent";
+import { intentHolds, intentRecheckMs, pausesAtOnce, shownPlaying, type PressIntent } from "../lib/pressIntent";
 import { dropParkedPreview, parkPreview, takeParkedPreview } from "../lib/previewKeep";
 import type { PreviewPass, PreviewStatus } from "../lib/previewStatus";
 import { getLevel, setLevel, boostAvailable, BOOST_ACCENT, MAX_LEVEL } from "../lib/audioBoost";
@@ -869,10 +869,11 @@ export function Controls({
       if (onSyncResume) onSyncResume(video.currentTime);
       else video.play();
     } else {
-      video.pause();
+      // A co-host's picture stops with the room's answer (lib/pressIntent pausesAtOnce).
+      if (pausesAtOnce(isHost, !!onSyncPause)) video.pause();
       onSyncPause?.(video.currentTime);
     }
-  }, [videoRef, canControl, held, onSyncPause, onSyncResume, noteIntent]);
+  }, [videoRef, canControl, held, onSyncPause, onSyncResume, noteIntent, isHost]);
 
   /** Where along the bar a client X coordinate falls, 0-1. Null if unmeasurable. */
   const pctFromClientX = useCallback((clientX: number): number | null => {

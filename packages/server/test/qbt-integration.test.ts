@@ -279,6 +279,34 @@ try {
     check("paused zero-viewer stream stays present for suppression", [stream(id).state, stream(id).viewer_count], ["paused", 0]);
     await disconnectRoom(id, [...members, joiner]);
   }
+
+  console.log("\n— a co-host's pause and resume keep the room's clock —");
+  {
+    // 18 November, 18:54 UTC, the test bot: a co-host paused at 384.54 and
+    // resumed 3.4 s later; the room resumed at 387.93, the pause counted as
+    // played, and every player but the host was moved 3.4 s ahead of it.
+    const { id, members } = await room(["host", "cohost", "viewer"]);
+    const [host, cohost, viewer] = members;
+    await play(id, host);
+    host.send({ type: "set-cohost", userId: cohost.userId, value: true });
+    await until("cohost granted", () => (cohost.last("participants")?.participants ?? [])
+      .some((member: Msg) => member.userId === cohost.userId && member.isCoHost));
+    host.send({ type: "heartbeat", position: 100, playing: true, waiting: false });
+    await until("the host's report reaches the viewer", () => viewer.last("heartbeat")?.position === 100);
+    await sleep(400);
+    cohost.send({ type: "pause", position: 100 });
+    await until("the pause reaches the host", () => host.last("pause") !== undefined);
+    const pausedAt = Number(host.last("pause")!.position);
+    check("a co-host's pause stops the clock where it stands, not at the host's last report",
+      pausedAt > 100.3 && pausedAt < 101, true);
+    await sleep(500);
+    cohost.send({ type: "resume", position: 100 });
+    await until("the resume reaches the viewer", () => viewer.last("resume") !== undefined);
+    const resumedAt = Number(viewer.last("resume")!.position);
+    check("a co-host's resume starts the clock where the pause stopped it",
+      Number(Math.abs(resumedAt - pausedAt).toFixed(2)) <= 0.02, true);
+    await disconnectRoom(id, members);
+  }
 } catch (error) {
   failed++;
   console.error("Integration scenario failed:", error);

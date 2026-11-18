@@ -333,7 +333,11 @@ export interface SyncActions {
     /** What the host restarted it for — see SyncState.hostSwitching. */
     switching?: Switching | null,
   ) => void;
-  sendPause: (position: number) => void;
+  /**
+   * `atOnce`: this player's picture stops now, as the host's does. A co-host's
+   * stops with the room's answer instead — lib/pressIntent pausesAtOnce.
+   */
+  sendPause: (position: number, atOnce?: boolean) => void;
   /**
    * `waiting`: resumed onto a picture that isn't ready yet — the host's
    * readiness, for the room. `hold`: this player holds until the room says it
@@ -611,8 +615,9 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
           };
         });
       },
-      sendPause: (position: number) => {
+      sendPause: (position: number, atOnce = true) => {
         send({ type: "pause", position });
+        if (!atOnce) return;
         setState((prev) => ({ ...prev, playing: false, position, positionAt: Date.now(), hostWaiting: false }));
       },
       sendResume: (position: number, waiting?: boolean, hold = false) => {

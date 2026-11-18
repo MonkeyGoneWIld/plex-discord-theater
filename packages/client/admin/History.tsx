@@ -1,7 +1,7 @@
 import { Fragment, useState } from "react";
 import { api } from "./api";
 import type { HealthPoint, PlayEvent, PlayStream, PlaySummary, PlayViewer, ProcessingStep } from "./types";
-import { bytes, clock, dateTime, dayTime, duration, short, shortTime, timeOfDay } from "./format";
+import { bytes, clock, dateTime, dayTime, duration, seconds, short, shortTime, timeOfDay } from "./format";
 import {
   BlockHead, BufferingCell, bufferingTone, DataCell, Downloads, eventText, eventTone, GROUP_LABELS, groupOf, PlaceName, SectionNav, useLoad, Where, Who,
   type EventGroup,
@@ -106,8 +106,8 @@ function PlayRow({ p, sub }: { p: PlaySummary; sub: string | null }) {
         <Poster ratingKey={p.ratingKey} title={p.title} size="sm" />
         <span className="play-main">
           <span className="play-title">{p.title ?? `Plex item ${p.ratingKey}`}</span>
-          <span className="play-sub">
-            {sub ? `${sub} · ` : ""}{dayTime(p.startedAt)} · Host: {p.hostName ?? p.hostUserId ?? "unknown"}
+          <span className="play-sub wraps">
+            {sub ? `${sub} · ` : ""}{dayTime(p.startedAt)} · <span className="nowrap">Host: {p.hostName ?? p.hostUserId ?? "unknown"}</span>
           </span>
           <span className="play-sub"><Where guildId={p.guildId} channelId={p.channelId} /></span>
         </span>
@@ -134,7 +134,7 @@ function PlayRow({ p, sub }: { p: PlaySummary; sub: string | null }) {
         </span>
         <span className="play-col">
           <span className={`health ${stallTone}`}><span className={`dot ${stallTone}`} />{p.stalls === 0 ? "No buffering" : `${p.stalls} buffering ${p.stalls === 1 ? "event" : "events"}`}</span>
-          <span className="play-label">{endText(p)}</span>
+          <span className="play-label wraps">{endText(p)}</span>
         </span>
         <span className="chev"><Icon name="chevron" size={16} /></span>
       </a>
@@ -462,7 +462,8 @@ function loadText(s: LoadStats | null): string {
 function PlayerHealth({ h }: { h: HealthSummary }) {
   if (h.samples === 0) return <><dt>Player health</dt><dd className="muted">Not recorded for this session</dd></>;
   const secs = (s: number) => duration(s * 1000);
-  const range = (avg: number | null, low: number | null) => (avg === null || low === null ? "Not reported" : `${secs(avg)} on average, ${secs(low)} at lowest`);
+  // Buffers in whole seconds, as the session timeline shows them.
+  const range = (avg: number | null, low: number | null) => (avg === null || low === null ? "Not reported" : `${seconds(avg)} on average, ${seconds(low)} at lowest`);
   const frames = h.framesShown === null && h.framesDropped === null ? null : (h.framesShown ?? 0) + (h.framesDropped ?? 0);
   const rate = (x: number) => `${Number(x.toFixed(2))}×`;
   return (
@@ -470,7 +471,7 @@ function PlayerHealth({ h }: { h: HealthSummary }) {
       <dt>Sync offset</dt>
       <dd>{h.syncAvgS === null || h.syncMaxS === null ? "None: the session's position follows this player (host)"
         : `${h.syncAvgS.toFixed(1)} s on average, ${h.syncMaxS.toFixed(1)} s at most`}</dd>
-      <dt>Forward buffer</dt><dd>{range(h.aheadAvgS, h.aheadMinS)}</dd>
+      <dt>Buffer</dt><dd>{range(h.aheadAvgS, h.aheadMinS)}</dd>
       <dt>Media element buffer</dt><dd>{range(h.bufferAvgS, h.bufferMinS)}</dd>
       <dt>Frames dropped</dt>
       <dd>{frames === null ? "Not reported by this client"

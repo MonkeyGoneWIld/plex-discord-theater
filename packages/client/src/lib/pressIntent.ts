@@ -38,3 +38,16 @@ export function intentRecheckMs(intent: PressIntent, now: number): number {
 export function shownPlaying(intent: PressIntent | null, elementPlaying: boolean, held: boolean, now: number): boolean {
   return intentHolds(intent, elementPlaying, now) ? intent!.playing : elementPlaying || held;
 }
+
+/**
+ * Whether pressing pause stops this player's picture at once. The host's does,
+ * and a player on its own: the room is where they are. A co-host's waits for
+ * the room's answer, as its play already does, and so stops when the host's
+ * does. Stopped first, it was a round trip behind the host after every pause
+ * and resume: on 18 November at 18:53 UTC a co-host's pause stopped its
+ * picture 290 ms before the host's, its resume started it with the host's,
+ * and its sync offset went from −1.29 s to −1.62 s.
+ */
+export function pausesAtOnce(isHost: boolean, inRoom: boolean): boolean {
+  return isHost || !inRoom;
+}

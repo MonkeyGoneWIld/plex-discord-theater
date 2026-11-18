@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import type { Client, Overview, PlayDetail, Room, Stream } from "./types";
 import { api } from "./api";
 import { drift, SessionTimeline } from "./timeline";
-import { ago, bytes, clock, dayTime, duration, quality, rate, zoneLabel } from "./format";
+import { ago, bytes, clock, dayTime, duration, quality, rate, seconds, zoneLabel } from "./format";
 import { BlockHead, BufferingCell, bufferingTone, DataCell, DecisionBadge, decisionOf, PlaceName } from "./parts";
 import { switchedText, trackName } from "./events";
 import { clientName, formatsText } from "./clients";
@@ -133,7 +133,7 @@ function AheadCell({ c }: { c: Client }) {
   const values = (p.health ?? []).map((h) => h[2]).filter((v): v is number => typeof v === "number");
   return (
     <span className="ahead-cell">
-      <span className={p.aheadS < 10 ? "warn-text" : ""}>{clock(p.aheadS)}</span>
+      <span className={p.aheadS < 10 ? "warn-text" : ""}>{seconds(p.aheadS)}</span>
       {values.length > 1 && <Spark values={values} height={18} />}
     </span>
   );
@@ -182,7 +182,7 @@ function Viewers({ room, tracks }: { room: Room; tracks: Record<string, string> 
         <thead>
           <tr>
             <th>Viewer</th><th>Status</th><th>Stream</th>
-            {sampled && <><th>Sync offset</th><th>Forward buffer</th></>}
+            {sampled && <><th>Sync offset</th><th>Buffer</th></>}
             {recorded && <><th>Watched</th><th>Data received</th><th className="num">Sent to peers</th><th>Buffering</th></>}
             <th aria-label="Details" />
           </tr>
@@ -337,7 +337,7 @@ function Session({ room, durationS, sub, tracks }: { room: Room; durationS: numb
 
       <div className="session-block">
         <BlockHead title={`Viewers (${room.clients.length})`}
-          help="Each viewer's status, stream, sync offset from the session position and forward buffer, updated live. Select a viewer for their client, formats and data totals." />
+          help="Each viewer's status, stream, sync offset from the session position and buffer, updated live. Select a viewer for their client, formats and data totals." />
         <Viewers room={room} tracks={tracks} />
       </div>
 

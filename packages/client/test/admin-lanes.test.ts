@@ -128,7 +128,7 @@ check("roles: in the order held, repeats folded", roleSummary([
   { role: "viewer", from: 0, to: 1 }, { role: "co-host", from: 1, to: 2 }, { role: "co-host", from: 2, to: 3 }, { role: "host", from: 3, to: 4 }] as never),
   "Viewer → Co-host → Host");
 check("roles: none is a viewer", roleSummary([]), "Viewer");
-check("offset: signed, to a tenth", [offsetText(1.24), offsetText(-0.8), offsetText(0.02)], ["+1.2 s", "−0.8 s", "0.0 s"]);
+check("offset: signed, to a hundredth as the player shows it", [offsetText(1.244), offsetText(-0.8), offsetText(0.02), offsetText(0.004)], ["+1.24 s", "−0.80 s", "+0.02 s", "0.00 s"]);
 
 // processing: names, durations and details.
 check("processing: names by mode", [processingName("whole file", true), processingName("whole file", false), processingName("first segment", false),

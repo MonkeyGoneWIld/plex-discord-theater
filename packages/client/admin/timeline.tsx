@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { HealthPoint, PlayDetail, PlayEvent, ProcessingStep, TrackPoint } from "./types";
 import { clock, quality, seconds, shortTime, timeOfDay } from "./format";
 import { decisionOf, reasonText } from "./parts";
@@ -8,7 +8,7 @@ import {
 import { Icon } from "./icons";
 import { Avatar, bps, SOURCES } from "./viz";
 import { clientName, clientsOf, rolesOf, type RoleSpan } from "./clients";
-import { deliveryParts, streamAt, type DeliveryPart } from "./session";
+import { deliveryParts, requiredOf, streamAt, type DeliveryPart } from "./session";
 import {
   deliveryOf, fits, labelWidth, offsetText, placeLabels, playbackOf, roleSummary, sampleAt, seriesOf, timeTicks, viewerStatusOf,
   type PlaybackSeg, type StatusSeg,
@@ -55,10 +55,10 @@ export function useWidth<T extends HTMLElement>(): [(el: T | null) => void, numb
   return [setEl, width];
 }
 
-/** "+1.2 s ahead", "0.8 s behind", "in sync". */
+/** "1.24 s ahead", "0.04 s behind", "in sync" at 0.00: to a hundredth, as the player shows it. */
 export function drift(s: number): string {
-  if (Math.abs(s) < 0.5) return "in sync";
-  return `${Math.abs(s).toFixed(1)} s ${s > 0 ? "ahead" : "behind"}`;
+  if (Math.abs(s) < 0.005) return "in sync";
+  return `${Math.abs(s).toFixed(2)} s ${s > 0 ? "ahead" : "behind"}`;
 }
 
 type Range = "all" | "30" | "10";
@@ -97,6 +97,37 @@ const ROLE_LABEL: Record<string, string> = { host: "Host", "co-host": "Co-host",
 
 /** What a viewer's lane marks: their own changes, and requests for the host role. */
 const VIEWER_MARKS = ["stream changed", "quality", "subtitles", "player error", "role", "asked for host", "request declined", "request ended", "switched client"];
+
+/** A bar 1 px in from each end, so neighbours keep a gap between them; one too narrow for a label, plain. */
+function seg(p: [number, number], cls: string, label: string | null = null, key?: string | number) {
+  const inset = p[1] >= 6 ? 1 : 0;
+  const w = p[1] - inset * 2;
+  return (
+    <span key={key} className={`tl-seg ${cls}${w < 10 ? " thin" : ""}`} style={{ left: p[0] + inset, width: w }}>
+      {label && fits(label, w) ? <span className="tl-seg-text">{label}</span> : null}
+    </span>
+  );
+}
+
+/** The readout's mark for an event: the one the timeline draws for it (a tl-key class). */
+function markOf(e: PlayEvent): string {
+  switch (e.kind) {
+    case "seek": return "seek";
+    case "buffering": return "buffering";
+    case "loaded at start": case "loaded after seek": return "loading";
+    case "player error": return "error";
+    case "stream restarted": return "restart";
+    case "play": case "resume": return "good";
+    case "pause": return "paused";
+    case "room waited": return "warn";
+    case "away from Discord": case "back in Discord": return "away";
+    case "joined": case "came back": case "left": {
+      const r = String(e.detail?.role ?? "viewer");
+      return r === "host" ? "role-host" : r === "co-host" ? "role-cohost" : "role-viewer";
+    }
+  }
+  return VIEWER_MARKS.includes(e.kind) ? "event" : "plain";
+}
 
 /** An SVG path through points, broken where a value is missing. */
 function linePath(points: Array<[number, number | null]>, x: (t: number) => number, y: (v: number) => number): string {
@@ -219,7 +250,23 @@ export function SessionTimeline({ data, durationS, ctx, live = false }: {
   const delivery = deliveryOf(data.health, data.flow);
   const syncLines = lanes.map((l) => ({ ...l, points: seriesOf(l.health, 1) })).filter((l) => l.points.some((p) => p[1] !== null));
   const bufferLines = lanes.map((l) => ({ ...l, points: seriesOf(l.health, 2) })).filter((l) => l.points.some((p) => p[1] !== null));
-  const dropLines = lanes.map((l) => ({ ...l, points: seriesOf(l.health, 9) })).filter((l) => l.points.some((p) => (p[1] ?? 0) > 0));
+  const dropAll = lanes.map((l) => ({ ...l, points: seriesOf(l.health, 9) })).filter((l) => l.points.some((p) => p[1] !== null));
+  const dropLines = dropAll.some((l) => l.points.some((p) => (p[1] ?? 0) > 0)) ? dropAll : [];
+  // The bitrate the players needed, as steps: worked out once for the session, not on every move of the pointer.
+  // In a session still going, a viewer who has not left holds their role to now, not to their last recorded sample.
+  const required = useMemo(() => requiredOf(events, streams, endAll > endRecorded ? lanes.map((l) => {
+    const presence = events.filter((e) => e.userId === l.userId && (e.kind === "joined" || e.kind === "came back" || e.kind === "left"));
+    if (!l.roles.length || presence[presence.length - 1]?.kind === "left") return l;
+    const last = l.roles[l.roles.length - 1];
+    return { ...l, roles: [...l.roles.slice(0, -1), { ...last, to: endAll }] };
+  }) : lanes, playback.filter((s) => s.state === "playing"), startAll, endAll),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [data, startAll, endAll]);
+  const requiredAt = (t: number) => {
+    let v = 0;
+    for (const [at, bps2] of required) { if (at > t) break; v = bps2; }
+    return v;
+  };
   const steps = data.processing ?? [];
 
   const onMove = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -239,8 +286,7 @@ export function SessionTimeline({ data, durationS, ctx, live = false }: {
       {playback.map((s, i) => {
         const p = place(s.from, s.to);
         if (!p) return null;
-        const label = PLAYBACK_LABEL[s.state];
-        return <span key={i} className={`tl-seg ${PLAYBACK_TONE[s.state]}`} style={{ left: p[0], width: p[1] }}>{fits(label, p[1]) ? label : null}</span>;
+        return seg(p, PLAYBACK_TONE[s.state], PLAYBACK_LABEL[s.state], i);
       })}
     </Row>
   );
@@ -328,8 +374,7 @@ export function SessionTimeline({ data, durationS, ctx, live = false }: {
     const mine = steps.filter((x2) => x2.hlsSessionId && x2.hlsSessionId === s.hlsSessionId && inView(x2.at));
     return (
       <Row key={s.id} name={`Stream ${i + 1}`} sub={`${d.label}${owner ? ` · for ${owner}` : ""}`} height={26}>
-        {p && <span className={`tl-seg ${d.tone === "warn" ? "warn" : d.tone === "good" ? "good" : "paused"}`} style={{ left: p[0], width: p[1] }}>
-          {fits(d.label, p[1]) ? d.label : null}</span>}
+        {p && seg(p, d.tone === "warn" ? "warn" : d.tone === "good" ? "good" : "paused", d.label)}
         {restarts.map((e) => <span key={e.id} className="tl-dot info" style={{ left: x(e.at) }} />)}
         {mine.map((m) => <span key={m.id} className={`tl-tick${m.ok ? "" : " bad"}`} style={{ left: x(m.at) }} />)}
       </Row>
@@ -341,13 +386,12 @@ export function SessionTimeline({ data, durationS, ctx, live = false }: {
       name={<><Avatar id={l.userId} name={l.name} size={18} /><span className="tl-person">{l.name}</span></>}>
       {l.roles.map((r, i) => {
         const p = place(r.from, r.to);
-        return p ? <span key={`r${i}`} className={`tl-seg role-${r.role === "co-host" ? "cohost" : r.role}`} style={{ left: p[0], width: p[1] }} /> : null;
+        return p ? seg(p, `role-${r.role === "co-host" ? "cohost" : r.role}`, null, `r${i}`) : null;
       })}
       {l.status.map((s, i) => {
         const p = place(s.from, s.to);
         if (!p) return null;
-        const label = STATUS_LABEL[s.state];
-        return <span key={`s${i}`} className={`tl-seg status ${s.state}`} style={{ left: p[0], width: p[1] }}>{fits(label, p[1]) ? label : null}</span>;
+        return seg(p, `status ${s.state}`, STATUS_LABEL[s.state], `s${i}`);
       })}
       {l.marks.filter((e) => inView(e.at)).map((e) => (
         <span key={e.id} className={`tl-dot ${e.kind === "player error" ? "error" : "event"}`} style={{ left: x(e.at) }} />
@@ -360,8 +404,10 @@ export function SessionTimeline({ data, durationS, ctx, live = false }: {
   if (delivery.points.length > 1) {
     // The scale is what is in view: zoomed in, the last ten minutes fill the lane.
     const peak = Math.max(...delivery.points.filter((p) => inView(p[0])).map((p) => p[1] + p[2] + p[3]), 0);
-    // The scale ends at the next round figure above the peak (38.4 Mbps on a 40 Mbps scale), not one step past it.
-    const top = niceTop(peak);
+    const needed = Math.max(0, ...required.filter(([t], i) => inView(t) || (required[i + 1]?.[0] ?? -Infinity) >= w0).map(([, v]) => v));
+    // The scale ends at the next round figure above the peak (38.4 Mbps on a 40 Mbps scale), not one step past it;
+    // the required bitrate keeps clear of the top edge and its figure.
+    const top = niceTop(Math.max(peak, needed * 1.08));
     const y = (v: number) => METRIC - 2 - (v / top) * (METRIC - 6);
     const areas = [1, 2, 3].map((k) => {
       const lower = (p: number[]) => p.slice(1, k).reduce((s, v) => s + v, 0);
@@ -372,11 +418,13 @@ export function SessionTimeline({ data, durationS, ctx, live = false }: {
       return `${topEdge}${bottom}Z`;
     });
     dataRow = (
-      <Row name="Data delivered" sub={`Peak ${bps(peak)}${delivery.stepMs === 60_000 ? " · per minute" : ""}`} height={METRIC} key="data" className="tl-metric">
+      <Row name="Delivered" sub={`Peak ${bps(peak)}${delivery.stepMs === 60_000 ? " · per minute" : ""}`} height={METRIC} key="data" className="tl-metric">
         <svg className="tl-svg" width={trackW} height={METRIC} aria-hidden="true">
           <rect className="tl-plot-bg" x={0} y={0} width={trackW} height={METRIC} rx={6} />
           {grid(METRIC)}
           {areas.map((d, i) => <path key={i} d={d} style={{ fill: SOURCES[i].color }} className="tl-area" />)}
+          {needed > 0 && <path className="tl-required" d={required.map(([t, v], i) =>
+            `${i ? `H${x(t).toFixed(1)}V` : `M${x(t).toFixed(1)},`}${y(v).toFixed(1)}`).join("")} />}
         </svg>
         <span className="tl-scale">{bps(top)}</span>
       </Row>
@@ -417,7 +465,6 @@ export function SessionTimeline({ data, durationS, ctx, live = false }: {
   };
 
   const healthRows = [
-    dataRow,
     syncLines.length > 0 && metricRow("sync", "Sync offset", "Tolerance ±2 s", syncLines,
       { symmetric: true, band: 2, floor: 3, cap: 30, fmt: (v) => `${v} s` }),
     bufferLines.length > 0 && metricRow("buffer", "Buffer", "Low below 10 s", bufferLines,
@@ -431,8 +478,16 @@ export function SessionTimeline({ data, durationS, ctx, live = false }: {
   const readout = (t: number) => {
     const pb = playback.find((s) => s.from <= t && t <= s.to);
     const pos = positionAt(track, t);
-    const near = newestFirst(events.filter((e) => Math.abs(e.at - t) <= Math.max(nearMs, 5_000) && e.kind !== "health")).slice(0, 4);
-    const nearSteps = steps.filter((s2) => Math.abs(s2.at - t) <= Math.max(nearMs, 5_000)).slice(0, 3);
+    // The events at the line: one whose stretch it is on (a load, a buffering, a wait) or nearest to it first.
+    const off = (e: PlayEvent) => {
+      const from = e.at - Math.max(0, Number(e.detail?.ms) || 0);
+      return t < from ? from - t : t > e.at ? t - e.at : 0;
+    };
+    const win = Math.max(nearMs, 5_000);
+    const near = events.filter((e) => e.kind !== "health" && off(e) <= win).sort((a, b) => off(a) - off(b) || b.at - a.at).slice(0, 5);
+    const nearSteps = steps.filter((s2) => Math.abs(s2.at - t) <= win).slice(0, 3);
+    const hereOff = Math.min(...near.map(off), ...nearSteps.map((s2) => Math.abs(s2.at - t)));
+    const isHere = (d: number) => d === hereOff && d <= nearMs;
     const dp = delivery.points.reduce<(typeof delivery.points)[number] | null>((b, p) => (!b || Math.abs(p[0] - t) < Math.abs(b[0] - t) ? p : b), null);
     const dpNear = dp && Math.abs(dp[0] - t) <= Math.max(delivery.stepMs, 10_000) ? dp : null;
     const running = streams.map((s, i) => ({ s, i })).filter(({ s }) => s.startedAt <= t && (s.endedAt ?? endAll) >= t);
@@ -440,6 +495,23 @@ export function SessionTimeline({ data, durationS, ctx, live = false }: {
     return (
       <>
         <div className="tl-tip-head"><strong>{timeOfDay(t)}</strong></div>
+        {(near.length > 0 || nearSteps.length > 0) && (
+          <section className="tl-tip-sec">
+            <h5>Events</h5>
+            <ul className="tl-tip-events">
+              {near.map((e) => (
+                <li key={e.id} className={isHere(off(e)) ? "here" : undefined}>
+                  <span className={`tl-key ${markOf(e)}`} /><span className="mono muted">{shortTime(e.at)}</span><span>{eventText(e, ctx)}</span>
+                </li>
+              ))}
+              {nearSteps.map((s2) => (
+                <li key={`p${s2.id}`} className={isHere(Math.abs(s2.at - t)) ? "here" : undefined}>
+                  <span className={`tl-key tick${s2.ok ? "" : " bad"}`} /><span className="mono muted">{shortTime(s2.at)}</span><span>{stepText(s2)}</span>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
         <section className="tl-tip-sec">
           <h5>Session</h5>
           <dl className="tl-tip-grid">
@@ -458,11 +530,12 @@ export function SessionTimeline({ data, durationS, ctx, live = false }: {
             </dl>
           </section>
         )}
-        {dpNear && (
+        {(dpNear || requiredAt(t) > 0) && (
           <section className="tl-tip-sec">
             <h5>Data delivered</h5>
             <ul className="tl-tip-data">
-              {SOURCES.map((src, i) => <li key={src.key}><span className="tl-key" style={{ background: src.color }} />{src.label} <strong>{bps(dpNear[i + 1])}</strong></li>)}
+              {dpNear && SOURCES.map((src, i) => <li key={src.key}><span className="tl-key" style={{ background: src.color }} />{src.label} <strong>{bps(dpNear[i + 1])}</strong></li>)}
+              {requiredAt(t) > 0 && <li><span className="tl-key line required" />Required <strong>{bps(requiredAt(t))}</strong></li>}
             </ul>
           </section>
         )}
@@ -526,15 +599,6 @@ export function SessionTimeline({ data, durationS, ctx, live = false }: {
             );
           })()}
         </section>
-        {(near.length > 0 || nearSteps.length > 0) && (
-          <section className="tl-tip-sec">
-            <h5>Events</h5>
-            <ul className="tl-tip-events">
-              {near.map((e) => <li key={e.id}><span className="mono muted">{shortTime(e.at)}</span> {eventText(e, ctx)}</li>)}
-              {nearSteps.map((s2) => <li key={`p${s2.id}`}><span className="mono muted">{shortTime(s2.at)}</span> {stepText(s2)}</li>)}
-            </ul>
-          </section>
-        )}
       </>
     );
   };
@@ -590,10 +654,11 @@ export function SessionTimeline({ data, durationS, ctx, live = false }: {
     {anyErrors && <Key cls="error" text="Player error" />}
   </>);
   const healthLines = lanes.filter((l) => [syncLines, bufferLines, dropLines].some((ls) => ls.some((m) => m.userId === l.userId)));
-  const healthKey = healthRows.length > 0 && keyRow("k-health", <>
-    {delivery.points.length > 1 && SOURCES.map((s) => <li key={s.key}><span className="tl-key" style={{ background: s.color }} />{s.label}</li>)}
-    {linesOf(healthLines)}
+  const dataKey = dataRow && keyRow("k-data", <>
+    {SOURCES.map((s) => <li key={s.key}><span className="tl-key" style={{ background: s.color }} />{s.label}</li>)}
+    {required.some(([, v]) => v > 0) && <li><span className="tl-key line required" />Required bitrate</li>}
   </>);
+  const healthKey = healthRows.length > 0 && keyRow("k-health", <>{linesOf(healthLines)}</>);
 
   return (
     <div className={`tl${narrow ? " narrow" : ""}`} ref={ref} style={{ ["--tl-label" as string]: `${labelW}px`, ["--tl-gap" as string]: `${gapW}px` }}>
@@ -623,7 +688,10 @@ export function SessionTimeline({ data, durationS, ctx, live = false }: {
         {viewerRows.length > 0 && <div className="tl-section">Viewers</div>}
         {viewerRows}
         {viewersKey}
-        {healthRows.length > 0 && <div className="tl-section">Delivery and player health</div>}
+        {dataRow && <div className="tl-section">Data delivered</div>}
+        {dataRow}
+        {dataKey}
+        {healthRows.length > 0 && <div className="tl-section">Player health</div>}
         {healthRows}
         {healthKey}
         {hover && <span className="tl-hover-line" style={{ left: labelW + gapW + hover.x }} />}
@@ -636,11 +704,17 @@ export function SessionTimeline({ data, durationS, ctx, live = false }: {
       <div className="tl-row tl-axis">
         <div className="tl-label" />
         <div className="tl-track" style={{ height: 18 }}>
-          {ticks.map((t) => {
-            const tx = x(t);
-            const w = labelWidth(tickText(t));
-            return <span key={t} style={{ left: Math.min(Math.max(0, tx - w / 2), trackW - w), width: w }}>{tickText(t)}</span>;
-          })}
+          {(() => {
+            // A time kept inside the track at either end may move onto its neighbour: that one is left out.
+            let lastRight = -Infinity;
+            return ticks.map((t) => {
+              const w = labelWidth(tickText(t));
+              const left = Math.min(Math.max(0, x(t) - w / 2), trackW - w);
+              if (left < lastRight + 8) return null;
+              lastRight = left + w;
+              return <span key={t} style={{ left, width: w }}>{tickText(t)}</span>;
+            });
+          })()}
         </div>
       </div>
       {hover && narrow && <div className="tl-tip docked">{readout(hover.t)}</div>}
@@ -695,7 +769,7 @@ export function Watched({ data, durationS }: { data: PlayDetail; durationS: numb
       : parts.map(([a, b]) => ({ from: a, to: b, cls: key === "all" ? "union" : unknown }));
     return (
       <Row key={key} name={name} sub={`${clock(seen)} watched · ${Math.round((seen / length) * 100)}%`} height={22}>
-        {segs.map((s, i) => <span key={i} className={`tl-seg ${s.cls}`} style={{ left: x(s.from), width: Math.max(2, x(s.to) - x(s.from)) }} />)}
+        {segs.map((s, i) => seg([x(s.from), Math.max(2, x(s.to) - x(s.from))], s.cls, null, i))}
         {marks.map((e) => <span key={e.id} className={`tl-dot ${e.kind === "player error" ? "error" : "stall"}`} style={{ left: x(e.posS!) }} />)}
       </Row>
     );
@@ -742,10 +816,16 @@ export function Watched({ data, durationS }: { data: PlayDetail; durationS: numb
       <div className="tl-row tl-axis">
         <div className="tl-label" />
         <div className="tl-track" style={{ height: 18 }}>
-          {ticks.map((s) => {
-            const w = labelWidth(clock(s));
-            return <span key={s} style={{ left: Math.min(Math.max(0, x(s) - w / 2), trackW - w), width: w }}>{clock(s)}</span>;
-          })}
+          {(() => {
+            let lastRight = -Infinity;
+            return ticks.map((s) => {
+              const w = labelWidth(clock(s));
+              const left = Math.min(Math.max(0, x(s) - w / 2), trackW - w);
+              if (left < lastRight + 8) return null;
+              lastRight = left + w;
+              return <span key={s} style={{ left, width: w }}>{clock(s)}</span>;
+            });
+          })()}
         </div>
       </div>
       <div className="tl-legend">

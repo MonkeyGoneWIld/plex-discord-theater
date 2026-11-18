@@ -230,7 +230,7 @@ export function roleSummary(roles: RoleSpan[]): string {
 }
 
 /** "+1.2 s", "−0.8 s", "0.0 s": a player's offset from the room. */
-export const offsetText = (s: number) => `${s > 0.05 ? "+" : s < -0.05 ? "−" : ""}${Math.abs(s).toFixed(1)} s`;
+export const offsetText = (s: number) => `${s >= 0.005 ? "+" : s <= -0.005 ? "−" : ""}${Math.abs(s).toFixed(2)} s`;
 
 /**
  * Round steps for an axis from 0 to at least `top`: 1, 2, 2.5 or 5 times a

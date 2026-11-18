@@ -122,6 +122,37 @@ export function streamAt(events: PlayEvent[], streams: PlayStream[], userId: str
   return own.find(running) ?? hosts ?? shared.find(running) ?? streams.find(running) ?? own[0] ?? shared[0] ?? null;
 }
 
+/**
+ * The bitrate the players needed over a session, as steps: while the room
+ * played, each viewer in it at the bitrate of the stream they were on. It
+ * changes only at a change of playback, of who is in, or of stream.
+ */
+export function requiredOf(events: PlayEvent[], streams: PlayStream[], people: Array<{ userId: string; roles: Array<{ from: number; to: number }> }>,
+  playing: Array<{ from: number; to: number }>, from: number, to: number): Array<[number, number]> {
+  const KINDS = new Set(["play", "resume", "pause", "stop", "ended", "joined", "left", "came back", "stream changed", "role"]);
+  const times = new Set<number>([from]);
+  for (const e of events) if (KINDS.has(e.kind)) times.add(e.at);
+  for (const s of playing) { times.add(s.from); times.add(s.to); }
+  for (const p of people) for (const r of p.roles) { times.add(r.from); times.add(r.to); }
+  const at = (t: number) => {
+    if (!playing.some((s) => s.from <= t && t < s.to)) return 0;
+    let bps = 0;
+    for (const p of people) {
+      if (!p.roles.some((r) => r.from <= t && t < r.to)) continue;
+      bps += (streamAt(events, streams, p.userId, t)?.kbps ?? 0) * 1000;
+    }
+    return bps;
+  };
+  const out: Array<[number, number]> = [];
+  for (const t of [...times].filter((v) => v >= from && v < to).sort((a, b) => a - b)) {
+    const v = at(t + 1);
+    if (out.length && out[out.length - 1][1] === v) continue;
+    out.push([t, v]);
+  }
+  if (out.length) out.push([to, out[out.length - 1][1]]);
+  return out;
+}
+
 export interface DeliveryPart { from: number; to: number; decision: "copy" | "transcode" | null }
 
 /**

@@ -182,13 +182,12 @@ export function useLoad<T>(load: () => Promise<T>, deps: unknown[], onError: (e:
 
 export { eventText, eventTone, GROUP_LABELS, groupOf, type EventContext, type EventGroup } from "./events";
 
-/** A section's heading, with a line on what it shows and anything that acts on it beside it. */
-export function BlockHead({ title, help, children }: { title: React.ReactNode; help?: React.ReactNode; children?: React.ReactNode }) {
+/** A section's heading, with anything that acts on it beside it. */
+export function BlockHead({ title, children }: { title: React.ReactNode; children?: React.ReactNode }) {
   return (
     <div className="block-head">
       <div className="block-title">
         <h4>{title}</h4>
-        {help && <p className="block-help">{help}</p>}
       </div>
       {children}
     </div>

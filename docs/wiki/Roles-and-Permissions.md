@@ -75,13 +75,15 @@ When the host leaves, the room promotes someone straight away, in this order:
 3. Someone who is watching
 4. Whoever joined earliest
 
-### The host comes back
+### Coming back
 
 - **Within 15 seconds:** a host who drops out briefly, for example on a
   connection blip or a pop-out, gets the host role back.
-- **Within 30 seconds, in a new Activity window:** when the host closes the
-  Activity and opens it again in the same channel while the room is empty,
-  the room and its stream carry over to the new window.
+- **Within 30 seconds, after everyone left:** the room keeps its title, place
+  and stream. Whoever was in it and comes back first, in the same Activity or
+  in a new Activity window in the same channel, carries it on as host, and the
+  session goes on from where it was. Someone who was not in the room
+  starts a new one.
 
 ## Co-hosts
 

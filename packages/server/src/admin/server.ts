@@ -269,7 +269,7 @@ export function createAdminApp(opts: AdminOptions): express.Express {
   });
   // The server's load over the last ?hours= hours (24 by default).
   app.get("/api/system-load", admin, recorded, (req: Request, res: Response) => {
-    res.json(recorder!.systemLoad({ hours: req.query.hours }));
+    res.json(recorder!.systemLoad({ hours: req.query.hours, days: req.query.days, from: req.query.from, to: req.query.to }));
   });
   // The history file, and what removing what is older than ?days= days would remove.
   const trimDays = (v: unknown): number | null => {

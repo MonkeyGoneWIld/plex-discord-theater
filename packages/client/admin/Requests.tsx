@@ -98,7 +98,6 @@ export function Requests({ onError }: { onError: (e: unknown) => void }) {
     <>
       <div className="page-head">
         <h1>Requests</h1>
-        <p className="muted">All titles requested through Seerr from the Activity, newest first.</p>
       </div>
       <MiniChart kind="requests" onError={onError} />
     <section className="card">

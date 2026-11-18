@@ -54,7 +54,7 @@ export const api = {
   /** By the day, hour and weekday of this browser's time zone. */
   graphs: (p: GraphPeriod) => call<Graphs>(`/api/graphs${qs({ ...p, tz: timeZone() })}`),
   names: () => call<PlaceNames>("/api/names"),
-  systemLoad: (hours: number) => call<SystemLoad>(`/api/system-load${qs({ hours })}`),
+  systemLoad: (p: GraphPeriod) => call<SystemLoad>(`/api/system-load${qs(p)}`),
   historyFile: (days?: number) => call<{ summary: HistorySummary; trim: TrimCounts | null }>(`/api/history-file${qs({ days })}`),
   trim: (days: number) => call<TrimCounts & { bytesBefore: number; bytesAfter: number }>("/api/history-file/trim", {
     method: "POST",

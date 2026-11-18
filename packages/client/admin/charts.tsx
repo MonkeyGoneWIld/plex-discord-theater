@@ -1,5 +1,5 @@
-import { useState, type ReactNode } from "react";
-import { Area, AreaChart, Bar, BarChart, CartesianGrid, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { useRef, useState, type ReactNode } from "react";
+import { Area, AreaChart, Bar, BarChart, CartesianGrid, ReferenceArea, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { dayTime, shortTime } from "./format";
 import { niceTicks, timeTicks } from "./lanes";
 import { useWidth } from "./timeline";
@@ -152,7 +152,7 @@ const DAY_MS = 86_400_000;
  * the time under the pointer, and a gap where nothing was recorded (null).
  * Rows carry their time as `at`.
  */
-export function Lines({ rows, series, fmt, axisFmt = fmt, height = 200, from, to, max, stacked = false, threshold, curve = "linear" }: {
+export function Lines({ rows, series, fmt, axisFmt = fmt, height = 200, from, to, max, stacked = false, threshold, curve = "linear", onZoom }: {
   rows: Row[];
   series: Series[];
   fmt: (n: number) => string;
@@ -167,8 +167,42 @@ export function Lines({ rows, series, fmt, axisFmt = fmt, height = 200, from, to
   threshold?: { value: number; label: string };
   /** Steps, for counts that hold until they change. */
   curve?: "linear" | "stepAfter";
+  /** Dragging across the chart picks a stretch of time to zoom into. */
+  onZoom?: (from: number, to: number) => void;
 }) {
-  const [ref, width] = useWidth<HTMLDivElement>();
+  const [setWidthEl, width] = useWidth<HTMLDivElement>();
+  const box = useRef<HTMLDivElement | null>(null);
+  const ref = (el: HTMLDivElement | null) => { box.current = el; setWidthEl(el); };
+  // The stretch being dragged across, kept in a ref as well so a quick drag reads where it started.
+  const [pick, setPickState] = useState<{ a: number; b: number } | null>(null);
+  const pickRef = useRef<{ a: number; b: number } | null>(null);
+  const setPick = (p: { a: number; b: number } | null) => { pickRef.current = p; setPickState(p); };
+  // The time under the pointer, from where it is across the plot.
+  const timeAt = (clientX: number) => {
+    const plot = box.current?.querySelector(".recharts-cartesian-grid")?.getBoundingClientRect();
+    if (!plot || plot.width <= 0) return null;
+    return from + Math.min(1, Math.max(0, (clientX - plot.left) / plot.width)) * (to - from);
+  };
+  const zoomEvents = onZoom ? {
+    onPointerDown: (e: React.PointerEvent) => {
+      if (e.pointerType === "touch" || e.button !== 0) return;
+      const t = timeAt(e.clientX);
+      if (t !== null) setPick({ a: t, b: t });
+    },
+    onPointerMove: (e: React.PointerEvent) => {
+      const p = pickRef.current;
+      const t = p && timeAt(e.clientX);
+      if (p && t !== null) setPick({ ...p, b: t });
+    },
+    onPointerUp: (e: React.PointerEvent) => {
+      const p = pickRef.current;
+      const b = timeAt(e.clientX) ?? p?.b;
+      setPick(null);
+      // A stretch of at least 1% of the width; a click is not a zoom.
+      if (p && b != null && Math.abs(b - p.a) >= (to - from) / 100) onZoom(Math.min(p.a, b), Math.max(p.a, b));
+    },
+    onPointerLeave: () => setPick(null),
+  } : {};
   const { ticks, stepMs } = timeTicks(from, to, Math.max(0, width - 70), width < 560 ? 76 : 110);
   // The value axis: a fixed top (a percentage), or round steps over the data and any threshold line.
   const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
@@ -183,7 +217,7 @@ export function Lines({ rows, series, fmt, axisFmt = fmt, height = 200, from, to
     return stepMs >= DAY_MS || (many && midnight) ? `${d.getDate()} ${MONTHS[d.getMonth()]}` : shortTime(t).replace(":00 ", " ");
   };
   return (
-    <div className="chart" style={{ height }} ref={ref}>
+    <div className={`chart${onZoom ? " zoomable" : ""}`} style={{ height }} ref={ref} {...zoomEvents}>
       <ResponsiveContainer width="100%" height="100%">
         <AreaChart data={rows} margin={{ top: 8, right: 10, bottom: 0, left: 0 }}>
           <CartesianGrid vertical={false} stroke="var(--grid)" />
@@ -193,6 +227,8 @@ export function Lines({ rows, series, fmt, axisFmt = fmt, height = 200, from, to
             ticks={yTicks} tickFormatter={(v) => axisFmt(Number(v))} />
           <Tooltip isAnimationActive={false} cursor={{ stroke: "var(--axis)", strokeDasharray: "3 3" }}
             content={(p) => <Tip active={p.active} payload={p.payload} label={p.label} series={series} fmt={fmt} title={(r) => dayTime(Number(r.at))} />} />
+          {pick && pick.a !== pick.b && <ReferenceArea x1={Math.min(pick.a, pick.b)} x2={Math.max(pick.a, pick.b)} fill="var(--accent)" fillOpacity={0.12}
+            stroke="var(--accent)" strokeOpacity={0.5} ifOverflow="hidden" />}
           {threshold && <ReferenceLine y={threshold.value} stroke="var(--muted)" strokeDasharray="4 4"
             label={{ value: threshold.label, position: "insideTopRight", fill: "var(--muted)", fontSize: 11 }} />}
           {series.map((s) => (

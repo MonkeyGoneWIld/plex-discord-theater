@@ -1081,6 +1081,39 @@ console.log("\n— a session's viewers, the host first —");
   again.close();
 }
 
+console.log("\n— server load over any period, and zoomed into a stretch of it —");
+{
+  // 18 November: Server load showed only the last 6 hours to 30 days, with no
+  // custom period and no zooming into a chart.
+  const MIN = 60_000;
+  const HOUR = 60 * MIN;
+  const now = 200 * 24 * HOUR;
+  const lPath = path.join(process.env.THUMB_CACHE_DIR!, "load-periods.sqlite");
+  const quiet = () => ({ at: now, totals: {}, rooms: [] }) as unknown as Overview;
+  const lr = new Recorder({ dbPath: lPath, now: () => now, instances: () => new Map(), system: () => null, source: quiet });
+  lr.close();
+  const db = new Database(lPath);
+  const put = db.prepare("INSERT INTO system_load (minute, streams, encodes, viewers, cpu_pct) VALUES (?, 1, 0, 2, ?)");
+  db.transaction(() => { for (let m = (now - 3 * 24 * HOUR) / MIN; m < now / MIN; m++) put.run(m, 10); })();
+  db.close();
+  const load = new Recorder({ dbPath: lPath, now: () => now, instances: () => new Map(), system: () => null, source: quiet });
+  const from = now - 30 * HOUR;
+  const to = now - 29 * HOUR;
+  const zoomed = load.systemLoad({ from, to });
+  check("a stretch from one time to another is the one shown", [zoomed.from, zoomed.to], [from, to]);
+  check("  in one-minute steps, every minute of it", [zoomed.stepMs, zoomed.points.filter((p) => p.cpuPct !== null).length], [MIN, 60]);
+  check("  and nothing from outside it", zoomed.points.every((p) => p.at >= from && p.at < to), true);
+  const custom = load.systemLoad({ from: String(now - 2 * 24 * HOUR), to: String(now - 24 * HOUR) });
+  check("a custom day, from the query string, in four-minute steps", [custom.from, custom.to, custom.stepMs], [now - 2 * 24 * HOUR, now - 24 * HOUR, 4 * MIN]);
+  check("a period that runs past now ends now", load.systemLoad({ from: now - HOUR, to: now + 5 * HOUR }).to, now);
+  check("one older than the 90 days kept starts at the 90 days", load.systemLoad({ from: now - 120 * 24 * HOUR, to: now }).from, now - 90 * 24 * HOUR);
+  check("one shorter than ten minutes is ten minutes", (() => { const s = load.systemLoad({ from: now - 3 * HOUR, to: now - 3 * HOUR + MIN }); return s.to - s.from; })(), 10 * MIN);
+  check("the last 7 days", load.systemLoad({ days: 7 }).from, now - 7 * 24 * HOUR);
+  check("the last hour, as before", [load.systemLoad({ hours: 1 }).from, load.systemLoad({ hours: 1 }).to], [now - HOUR, now]);
+  check("a stretch that ends before it starts is the last 24 hours", load.systemLoad({ from: now - HOUR, to: now - 2 * HOUR }).from, now - 24 * HOUR);
+  load.close();
+}
+
 for (const ws of sockets) ws.terminate();
 closeWebSocketServer();
 server.close();

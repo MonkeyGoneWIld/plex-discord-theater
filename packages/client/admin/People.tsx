@@ -42,7 +42,6 @@ function PeopleList({ onError }: { onError: (e: unknown) => void }) {
     <>
       <div className="page-head">
         <h1>Users</h1>
-        <p className="muted">All users of the Activity, most recently active first. Select a user to view their sessions, requests and servers.</p>
       </div>
     <MiniChart kind="people" onError={onError} />
     <section className="card">

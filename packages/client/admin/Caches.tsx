@@ -17,7 +17,7 @@ export function Caches({ onError }: { onError: (e: unknown) => void }) {
       <div className="page-head with-action">
         <div>
           <h1>Caches</h1>
-          <p className="muted">Server storage and Discord cache efficiency. Updated at {timeOfDay(data.at)}.</p>
+          <p className="muted">Updated at {timeOfDay(data.at)}.</p>
         </div>
         <button className="ghost" onClick={reload} disabled={busy}>{busy ? "Refreshing…" : "Refresh"}</button>
       </div>
@@ -39,7 +39,6 @@ function Storage({ caches }: { caches: CacheView[] }) {
       <header className="room-head">
         <div>
           <h3>Storage used</h3>
-          <p className="muted small cache-what">Total storage used by the server, with each cache's share, largest first.</p>
         </div>
         <div className="cache-size">
           <strong className="storage-total">{bytes(total)}</strong>
@@ -101,10 +100,6 @@ function Discord({ d }: { d: CachesResult["discord"] }) {
   return (
     <section className="card">
       <h3>Discord cache efficiency</h3>
-      <p className="muted small">
-        Video segments are delivered through Discord's media proxy, which caches them. Cached segments are served
-        without contacting this server. Figures are reported by viewers' players.
-      </p>
       <div className="tiles">
         <SumTile label="Last 24 hours" s={d.day} />
         <SumTile label="Last 7 days" s={d.week} />
@@ -148,7 +143,6 @@ function CacheCard({ c }: { c: CacheView }) {
       <header className="room-head">
         <div>
           <h3>{c.name}</h3>
-          <p className="muted small cache-what">{c.what}</p>
         </div>
         <div className="cache-size">
           <strong>{bytes(c.bytes)}</strong>

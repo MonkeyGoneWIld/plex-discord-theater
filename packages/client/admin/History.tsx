@@ -69,7 +69,6 @@ function PlayList({ onError }: { onError: (e: unknown) => void }) {
     <>
       <div className="page-head">
         <h1>History</h1>
-        <p className="muted">All playback sessions, newest first. Select a session to view its viewers, streams and timeline.</p>
       </div>
       <MiniChart kind="plays" onError={onError} />
       <section className="card">
@@ -214,32 +213,28 @@ function PlayPage({ id, onError }: { id: number; onError: (e: unknown) => void }
       ]} />
 
       <section className="card" id="sec-timeline">
-        <BlockHead title="Session timeline"
-          help="Playback, position in the title, streams, viewers, data delivered and player health on one time axis. Hover over or tap the chart for the values at that moment." />
+        <BlockHead title="Session timeline" />
         <SessionTimeline data={data} durationS={i?.durationS ?? null} ctx={ctx} />
       </section>
 
       <section className="card" id="sec-viewers">
-        <BlockHead title={`Viewers (${viewers.length})`}
-          help="What each viewer watched and received, their buffering, pauses, loading times and time away from Discord. Select a viewer for their roles, clients and each pause." />
+        <BlockHead title={`Viewers (${viewers.length})`} />
         <SessionViewers viewers={viewers} events={events} lead={data.lead ?? []} streams={streams} ctx={ctx} end={play.endedAt ?? Date.now()}
           health={data.health ?? {}} />
       </section>
 
       <section className="card" id="sec-moments">
-        <BlockHead title="Key moments" help="Significant events and their causes, newest first." />
+        <BlockHead title="Key moments" />
         <KeyMoments data={data} ctx={ctx} />
       </section>
 
       <section className="card" id="sec-coverage">
-        <BlockHead title="Viewing coverage"
-          help="Portions of the title watched by each viewer, on the title's runtime, with seeks, buffering and player errors marked." />
+        <BlockHead title="Viewing coverage" />
         <Watched data={data} durationS={i?.durationS ?? null} />
       </section>
 
       <section className="card" id="sec-streams">
-        <BlockHead title={`Streams (${streams.length})`}
-          help="Each stream the server sent: whether it was played directly or transcoded and why, its tracks and its viewers." />
+        <BlockHead title={`Streams (${streams.length})`} />
         {streams.length === 0 ? <p className="muted">No stream was started.</p>
           : streams.map((s, n) => (
             <StreamCard key={s.id} s={{
@@ -252,14 +247,13 @@ function PlayPage({ id, onError }: { id: number; onError: (e: unknown) => void }
       </section>
 
       <section className="card" id="sec-processing">
-        <BlockHead title="Media processing"
-          help="How long the server took to analyse the file, set up each stream, produce its first segment, extract subtitles and generate seek previews." />
+        <BlockHead title="Media processing" />
         <ProcessingTable steps={data.processing ?? []} streams={streams} />
       </section>
 
       {(data.shares?.length ?? 0) > 0 && (
         <section className="card" id="sec-sharing">
-          <BlockHead title="Peer-to-peer sharing" help="Video data relayed from one viewer's player to another." />
+          <BlockHead title="Peer-to-peer sharing" />
           <ShareList shares={data.shares ?? []} nameOf={(id) => nameOf(id) ?? id} />
         </section>
       )}
@@ -470,7 +464,7 @@ function PlayerHealth({ h }: { h: HealthSummary }) {
     <>
       <dt>Sync offset</dt>
       <dd>{h.syncAvgS === null || h.syncMaxS === null ? "None: the session's position follows this player (host)"
-        : `${h.syncAvgS.toFixed(1)} s on average, ${h.syncMaxS.toFixed(1)} s at most`}</dd>
+        : `${h.syncAvgS.toFixed(2)} s on average, ${h.syncMaxS.toFixed(2)} s at most`}</dd>
       <dt>Buffer</dt><dd>{range(h.aheadAvgS, h.aheadMinS)}</dd>
       <dt>Media element buffer</dt><dd>{range(h.bufferAvgS, h.bufferMinS)}</dd>
       <dt>Frames dropped</dt>
@@ -500,8 +494,7 @@ function Timeline({ events, ctx }: { events: PlayEvent[]; ctx: EventContext }) {
   };
   return (
     <section className="card" id="sec-events">
-      <BlockHead title={`Event log (${shown.size ? `${list.length} of ${events.length}` : events.length})`}
-        help="Every recorded event, newest first. Select one or more types to show only those; with none selected, every event is shown." />
+      <BlockHead title={`Event log (${shown.size ? `${list.length} of ${events.length}` : events.length})`} />
       <div className="panel-head">
         <div className="chips" role="group" aria-label="Show only these event types">
           {ALL_GROUPS.filter((g) => counts.get(g)).map((g) => (

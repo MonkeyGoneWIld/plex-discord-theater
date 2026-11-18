@@ -26,6 +26,11 @@ export function noteServerTime(serverMs: number, localMs = Date.now()): void {
   offsetMs = Math.max(...samples);
 }
 
+/** Whether the server has said its time yet: until it has, serverNow is this device's own clock. */
+export function serverClockKnown(): boolean {
+  return samples.length > 0;
+}
+
 /** The server's time now; this device's own until the server has said. */
 export function serverNow(localMs = Date.now()): number {
   return localMs + offsetMs;

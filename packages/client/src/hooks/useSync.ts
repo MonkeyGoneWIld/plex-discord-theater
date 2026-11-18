@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { getSessionToken } from "../lib/api";
-import { noteServerTime } from "../lib/serverClock";
+import { noteServerTime, serverClockKnown, serverNow } from "../lib/serverClock";
 import { hdrScreenQuery, playerCaps, type Cap } from "../lib/codecs";
 import { adoptSitting, preferredQuality, setSittingSink } from "../lib/quality";
 import { logEvent } from "../lib/log";
@@ -355,7 +355,8 @@ export interface SyncActions {
   sendStop: (cause?: "closed" | "finished") => void;
   /** `waiting`: the host's picture isn't ready — SyncState.hostWaiting.
    *  `switching`: what it is rebuilt for, while it waits — hostSwitching. */
-  sendHeartbeat: (position: number, playing: boolean, waiting?: boolean, switching?: Switching | null) => void;
+  /** `moving`: the picture is playing as this is read, so the server may count on from when it was sent. */
+  sendHeartbeat: (position: number, playing: boolean, waiting?: boolean, switching?: Switching | null, moving?: boolean) => void;
   acknowledgeTransport: (revision: number) => void;
   sendBrowse: (context: string) => void;
   sendQueueAdd: (item: QueueItem) => void;
@@ -661,10 +662,13 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
         }));
       },
       acknowledgeTransport: (revision: number) => { appliedTransportRevision.current = revision; },
-      sendHeartbeat: (position: number, playing: boolean, waiting = false, switching: Switching | null = null) => {
+      sendHeartbeat: (position: number, playing: boolean, waiting = false, switching: Switching | null = null, moving = false) => {
         send({
           type: "heartbeat", position, playing, waiting, transportRevision: appliedTransportRevision.current,
           ...(waiting && switching ? { switching } : {}),
+          // When it was read, by the server's clock: one that is a while
+          // arriving is counted on from then rather than taken for now.
+          ...(moving && !waiting && serverClockKnown() ? { sentAt: Math.round(serverNow()) } : {}),
         });
         // Kept locally too. The server excludes a sender from its own
         // broadcast, and the host is the only client that heartbeats — so the

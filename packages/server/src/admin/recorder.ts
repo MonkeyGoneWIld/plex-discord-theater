@@ -1435,23 +1435,36 @@ export class Recorder {
    * the machine's CPU and memory on average and at most, the bot's, the load
    * average, and at most the streams, transcodes and viewers.
    */
-  systemLoad(opts: { hours?: unknown } = {}, now = this.now()) {
-    const hours = Math.min(24 * 90, Math.max(1, Math.floor(Number(opts.hours) || 24)));
-    const from = now - hours * HOUR_MS;
+  systemLoad(opts: { hours?: unknown; days?: unknown; from?: unknown; to?: unknown } = {}, now = this.now()) {
+    // The last so many hours or days, or from one time to another (a custom period, or a zoom into a chart):
+    // within the 90 days kept, ten minutes at the least.
+    const oldest = now - 90 * 24 * HOUR_MS;
+    const f = Number(opts.from);
+    const t = Number(opts.to);
+    let from: number;
+    let to: number;
+    if (opts.from != null && opts.to != null && Number.isFinite(f) && Number.isFinite(t) && t > f) {
+      to = Math.min(now, t);
+      from = Math.max(oldest, Math.min(f, to - 10 * 60_000));
+    } else {
+      const asked = Number(opts.days) > 0 ? Number(opts.days) * 24 : Number(opts.hours) || 24;
+      to = now;
+      from = now - Math.min(24 * 90, Math.max(1, Math.floor(asked))) * HOUR_MS;
+    }
     // About 360 steps, whole minutes each.
-    const step = Math.max(1, Math.round((hours * 60) / 360));
+    const step = Math.max(1, Math.round((to - from) / 60_000 / 360));
     const rows = this.st(`SELECT (minute / @step) * @step AS m, AVG(cpu_pct) AS cpu, MAX(cpu_pct) AS cpu_max, AVG(bot_cpu_pct) AS bot,
         AVG(mem_pct) AS mem, MAX(mem_pct) AS mem_max, MAX(rss_mb) AS rss, AVG(load1) AS load1,
         MAX(streams) AS streams, MAX(encodes) AS encodes, MAX(viewers) AS viewers
       FROM system_load WHERE minute >= @from AND minute < @to GROUP BY m ORDER BY m`)
-      .all({ step, from: Math.floor(from / 60_000), to: Math.ceil(now / 60_000) }) as Array<Record<string, number | null>>;
+      .all({ step, from: Math.floor(from / 60_000), to: Math.ceil(to / 60_000) }) as Array<Record<string, number | null>>;
     const r1 = (v: number | null) => (v === null ? null : Math.round(v * 10) / 10);
     // What the bot's port sent, as bits a second, over the same steps.
     const sent = new Map((this.st(`SELECT (minute / @step) * @step AS m, SUM(sent_bytes) AS b FROM traffic
-        WHERE minute >= @from AND minute < @to GROUP BY m`).all({ step, from: Math.floor(from / 60_000), to: Math.ceil(now / 60_000) }) as
+        WHERE minute >= @from AND minute < @to GROUP BY m`).all({ step, from: Math.floor(from / 60_000), to: Math.ceil(to / 60_000) }) as
       Array<{ m: number; b: number }>).map((r) => [r.m, r.b] as const));
     return {
-      from, to: now, stepMs: step * 60_000, cores: os.cpus().length, memTotalMb: Math.round(os.totalmem() / 1e6),
+      from, to, stepMs: step * 60_000, cores: os.cpus().length, memTotalMb: Math.round(os.totalmem() / 1e6),
       points: rows.map((r) => ({
         at: Number(r.m) * 60_000, cpuPct: r1(r.cpu), cpuMaxPct: r1(r.cpu_max), botCpuPct: r1(r.bot), memPct: r1(r.mem), memMaxPct: r1(r.mem_max),
         rssMb: r1(r.rss), load1: r.load1 === null ? null : Math.round(r.load1 * 100) / 100,

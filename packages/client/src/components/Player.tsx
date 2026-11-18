@@ -2651,7 +2651,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       return;
     }
     if (v && v.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
-      syncActionsRef.current?.sendHeartbeat(hostPositionForRoom(), !v.paused || hostHeldRef.current, hostToldWaitingRef.current);
+      syncActionsRef.current?.sendHeartbeat(hostPositionForRoom(), !v.paused || hostHeldRef.current, hostToldWaitingRef.current, null,
+        !v.paused && !v.seeking);
     }
   }, [hostPositionForRoom]);
   const sendHostHeartbeatRef = useRef(sendHostHeartbeat);

@@ -16,7 +16,6 @@ export function Places({ onError }: { onError: (e: unknown) => void }) {
     <>
       <div className="page-head">
         <h1>Discord Servers</h1>
-        <p className="muted">Discord servers and channels where the Activity is used, with launches, users and sessions.</p>
       </div>
       <MiniChart kind="servers" onError={onError} />
       {busy && !data ? <p className="empty">Loading…</p> : guilds.length === 0

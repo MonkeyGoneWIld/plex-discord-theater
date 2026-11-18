@@ -9,7 +9,7 @@
  */
 import { eventDetails, eventText, eventTone, finishedAt, groupOf, jumpsOf, newestFirst, positionAt, positionTicks, streamDiff, trackName, unionParts, variantParts } from "../admin/events";
 import { clientName, clientsOf, rolesOf } from "../admin/clients";
-import { awayOf, deliveryParts, hostAt, loadTimes, pausesByPerson, pausesOf, streamAt } from "../admin/session";
+import { awayOf, deliveryParts, hostAt, loadTimes, pausesByPerson, pausesOf, requiredOf, streamAt } from "../admin/session";
 import { drift } from "../admin/timeline";
 import { progressText } from "../admin/streams";
 import { sessionLogsHref } from "../admin/Logs";
@@ -297,8 +297,22 @@ const followerTrack: TrackPoint[] = [[30000, 30, 1], [40000, 40, 1], [50000, 50,
 check("  so their coverage shows how it reached them, not an unrecorded stream",
   deliveryParts(followerTrack, joinedOnto, hostOwn, "2"), [{ from: 30, to: 50, decision: "copy" }]);
 
+console.log("\n— the bitrate the players needed —");
+{
+  const s8 = { ...stream("1:0", "copy", null), kbps: 8000 } as PlayStream;
+  const s3 = { ...stream("2:0", "transcode", "2"), kbps: 3000 } as PlayStream;
+  const evs = [by("play", "1", 0), by("joined", "2", 10000, { role: "viewer", stream: "1:0" }), by("stream changed", "2", 20000, { from: "1:0", to: "2:0" }),
+    by("pause", "1", 30000), by("resume", "1", 40000), by("left", "2", 50000)];
+  const people = [{ userId: "1", roles: [{ from: 0, to: 60000 }] }, { userId: "2", roles: [{ from: 10000, to: 50000 }] }];
+  const playing = [{ from: 0, to: 30000 }, { from: 40000, to: 60000 }];
+  check("each viewer in at their stream's bitrate while it plays, nothing while paused, a step at each change",
+    requiredOf(evs, [s8, s3], people, playing, 0, 60000),
+    [[0, 8e6], [10000, 16e6], [20000, 11e6], [30000, 0], [40000, 11e6], [50000, 8e6], [60000, 8e6]]);
+}
+
 console.log("\n— live: sync, encoding, logs —");
-check("sync offset, said", [drift(0.3), drift(2.44), drift(-3)], ["in sync", "2.4 s ahead", "3.0 s behind"]);
+check("sync offset, said to a hundredth", [drift(0.3), drift(-0.04), drift(0.004), drift(2.44), drift(-3)],
+  ["0.30 s ahead", "0.04 s behind", "in sync", "2.44 s ahead", "3.00 s behind"]);
 check("processing: its speed now, how far ahead of playback, what it uses",
   [progressText({ encode: true, state: "making", speedX: 3, recentX: 4.2, aheadS: 190, cores: 1.2, gpu: [{ engine: "video", share: 0.34 }] }),
     progressText({ encode: true, state: "making", speedX: 2, recentX: null, aheadS: 40, cores: 2, gpu: [] }),

@@ -48,7 +48,6 @@ export function Settings({ onError }: { onError: (e: unknown) => void }) {
     <>
       <div className="page-head">
         <h1>System</h1>
-        <p className="muted">The server's status and load, its history database, and its configuration.</p>
       </div>
 
       <div className="stats">

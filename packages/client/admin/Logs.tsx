@@ -71,7 +71,7 @@ export function Logs({ onError, route = null }: { onError: (e: unknown) => void;
     <>
       <div className="page-head">
         <h1>Logs</h1>
-        <p className="muted">Server log files, newest first, including entries reported by viewers' players. Times are shown in your local time zone ({zoneLabel()}); each file covers one UTC day.</p>
+        <p className="muted">Times in your local time zone ({zoneLabel()}); each file covers one UTC day.</p>
       </div>
     <section className="card">
       <form className="toolbar" onSubmit={(e) => { e.preventDefault(); void load(); }}>

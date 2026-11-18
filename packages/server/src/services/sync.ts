@@ -549,6 +549,11 @@ interface Room {
    */
   heldFor?: { hostUserId: string; guildId: string | null; channelId: string | null };
   /**
+   * Everybody who has been in the room, by Discord user id: any of them back to
+   * it while it is held carries it on, not only its host — see carryHeldRoom.
+   */
+  members: Set<string>;
+  /**
    * Viewers whose connection closed while they were on a choice of their own,
    * by Discord user id: what they were on, kept AWAY_HOLD_MS for them to come
    * back to. Without it a viewer back from a blip or a pop-out was put on the
@@ -599,6 +604,13 @@ function setTransport(room: Room, playing: boolean): void {
 const SEEK_HOLD_MS = 30_000;
 /** A host report this far from where it skipped to is the place it left. */
 const SEEK_HOLD_SLACK_S = 10;
+/**
+ * A host's heartbeat this late or later, by the time it says it was sent, is
+ * counted on from then: below it is the network's ordinary half-second.
+ * Past the longest, the stamp is not believed.
+ */
+const LATE_HEARTBEAT_MS = 1_000;
+const LATE_HEARTBEAT_MAX_MS = 30_000;
 
 
 function closeGather(room: Room): void {
@@ -1322,6 +1334,7 @@ function getOrCreateRoom(instanceId: string): Room {
       },
       coHostIds: new Set(),
       lastForcedPersistAt: 0,
+      members: new Set(),
       away: new Map(),
       hostRequests: newHostRequests(),
     };
@@ -2103,8 +2116,12 @@ function carryHeldRoom(
     if (id === toId || !r.emptyHold || r.clients.size > 0) continue;
     // Not instanceHosts: the new instance's registration has already deleted
     // the old one's record (run 29, A8 retest, Rain Man reopened 10 s later).
+    // Its host, or anybody who was in it: everybody out, Discord ends the
+    // instance, and whoever opens the Activity again has a new one (18
+    // November: a viewer back 20 s later, the film started over).
     const was = r.heldFor;
-    if (was?.hostUserId !== userId || was.channelId !== to.channelId || was.guildId !== to.guildId) continue;
+    if (!was || (was.hostUserId !== userId && !r.members.has(userId))) continue;
+    if (was.channelId !== to.channelId || was.guildId !== to.guildId) continue;
     held = [id, r];
   }
   if (!held) return;
@@ -2118,7 +2135,9 @@ function carryHeldRoom(
   for (const v of room.state.variants.values()) {
     if (v.hlsSessionId) startSessionPing(toId, v.hlsSessionId);
   }
-  logEvent("Sync", "the host opened the Activity again, and their room comes with them", {
+  logEvent("Sync", room.heldFor?.hostUserId === userId
+    ? "the host opened the Activity again, and their room comes with them"
+    : "one who was in the room opened the Activity again, and the room comes with them", {
     from: fromId.substring(0, 8),
     to: toId.substring(0, 8),
     ratingKey: room.state.ratingKey,
@@ -2379,7 +2398,11 @@ export function attachWebSocketServer(server: Server): void {
         const nobodyHost = !room.emptyHold
           && !!out && out.userId === instance.hostUserId && out.userId !== userId
           && ![...room.clients].some((c) => c.isHost && c.userId !== userId);
-        if (hostBackInTime || (!isHost && nobodyHost)) {
+        // One who was in a room held for its host, back to it first with
+        // nobody else there: it carries on for them, as host, rather than
+        // waiting out the hold for the host.
+        const backFirst = !isHost && !!room.emptyHold && room.clients.size === 0 && room.members.has(userId);
+        if (hostBackInTime || (!isHost && (nobodyHost || backFirst))) {
           const holder = [...room.clients].find((c) => c.isHost && c.userId !== userId) ?? null;
           noteRole(room, hostBackInTime ? "host back" : "nobody was host", hostBackInTime ? holder : null, username ?? userId);
           if (hostBackInTime) {
@@ -2396,6 +2419,7 @@ export function attachWebSocketServer(server: Server): void {
           updateInstanceHost(instanceId, userId);
           logEvent("Sync", hostBackInTime
             ? "the host is back in time, and is host again"
+            : backFirst ? "one who was in the room is back to it first, and is host"
             : "nobody was host, so the one who came in is", {
             room: instanceId.substring(0, 8),
             user: username ?? userId,
@@ -2403,6 +2427,7 @@ export function attachWebSocketServer(server: Server): void {
         }
         // The host back to a room held for them — see holdEmptyRoom. It
         // waits for their picture, which they say when it is ready.
+        const tookHeld = !!room.emptyHold && isHost;
         if (room.emptyHold && isHost) {
           clearTimeout(room.emptyHold);
           room.emptyHold = undefined;
@@ -2494,6 +2519,13 @@ export function attachWebSocketServer(server: Server): void {
         };
         roomId = instanceId;
         room.clients.add(client);
+        room.members.add(userId);
+        // Somebody else than the one who drove it, taking a held room: its
+        // stream is theirs to drive now, with nobody else on it to.
+        if (tookHeld && client.variantKey) {
+          const held = room.state.variants.get(client.variantKey);
+          if (held) ensureVariantOwner(room, held);
+        }
 
         // Back to their own stream, if it is still running for this title.
         // Otherwise on the host's like anybody joining, and the one they left
@@ -3411,6 +3443,19 @@ export function attachWebSocketServer(server: Server): void {
            * load for everybody (the client's rebuildHoldRef).
            */
           let reported = safePosition(msg.position, room.state.position);
+          // Where a playing host was when it sent this, which may be a while
+          // ago: on 18 November one arrived 7 s late, the room went back 7.7 s
+          // to it, a viewer held there for it and then jumped 7 s on again.
+          const lateMs = typeof msg.sentAt === "number" && Number.isFinite(msg.sentAt) ? Date.now() - msg.sentAt : 0;
+          if (playing && msg.waiting !== true && lateMs >= LATE_HEARTBEAT_MS && lateMs <= LATE_HEARTBEAT_MAX_MS) {
+            reported += lateMs / 1000;
+            logEvent("Sync", "the host's heartbeat came late, counted on from when it was sent", {
+              room: roomId.substring(0, 8),
+              lateMs,
+              sentPosS: Number(safePosition(msg.position, room.state.position).toFixed(2)),
+              nowS: Number(reported.toFixed(2)),
+            });
+          }
           // Except a host still getting to where it skipped: its report is the
           // place it is leaving — see RoomState.seekHold.
           const hold = room.state.seekHold;

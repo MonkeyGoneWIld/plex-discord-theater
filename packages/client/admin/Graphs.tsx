@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { api, type GraphPeriod } from "./api";
 import type { GraphDay, Graphs as GraphData, PersonPlay, SystemLoad } from "./types";
-import { bytes, clock, dayDate, dayTime, duration, hourLabel, zoneLabel } from "./format";
+import { bytes, clock, dayDate, dayTime, duration, hourLabel, shortTime, zoneLabel } from "./format";
 import { reasonText, SectionNav, useLoad } from "./parts";
 import { PROCESSING_HELP, PROCESSING_NAMES, PROCESSING_ORDER } from "./processing";
 import { usePlaceNames } from "./names";
@@ -146,7 +146,7 @@ export function Graphs({ onError }: { onError: (e: unknown) => void }) {
     <>
       <div className="page-head">
         <h1>Statistics</h1>
-        <p className="muted">Usage over the selected period. Times are shown in your local time zone ({zoneLabel()}); sessions are counted on the day they started.</p>
+        <p className="muted">Times in your local time zone ({zoneLabel()}); sessions count on the day they started.</p>
       </div>
       <div className="period" role="group" aria-label="Period">
         {PERIODS.map((p) => (
@@ -374,7 +374,7 @@ function GraphsBody({ g }: { g: GraphData }) {
       <SectionNav sections={[["usage", "Usage"], ["audience", "Users, titles and servers"], ["delivery", "Data delivery"],
         ["streams", "Streams and processing"], ["quality", "Playback quality"], ["requests", "Launches and requests"]]} />
 
-      <StatsGroup id="usage" title="Usage" help="Sessions and watch time over the period, and when sessions take place.">
+      <StatsGroup id="usage" title="Usage">
         <div className="charts">
           <ChartCard title={`Sessions ${per}`} series={one("plays", "Sessions")} table={table(one("plays", "Sessions"), count)}>
             <Columns rows={chartRows} x="label" series={one("plays", "Sessions")} fmt={count} tipTitle={tipTitle} />
@@ -402,7 +402,7 @@ function GraphsBody({ g }: { g: GraphData }) {
         </div>
       </StatsGroup>
 
-      <StatsGroup id="audience" title="Users, titles and servers" help="Watch time by user, title and Discord server.">
+      <StatsGroup id="audience" title="Users, titles and servers">
         <div className="charts">
           <ChartCard title="Most active users" sub="By watch time" series={one("watchedS", "Watch time")}
             table={<TopTable rows={peopleRows} cols={[["Sessions", "plays", count], ["Watch time", "watchedS", hours], ["Data received", "bytes", bytes],
@@ -432,7 +432,7 @@ function GraphsBody({ g }: { g: GraphData }) {
         </div>
       </StatsGroup>
 
-      <StatsGroup id="delivery" title="Data delivery" help="Data delivered to players by source, server upload, and peer-to-peer transfers.">
+      <StatsGroup id="delivery" title="Data delivery">
         <div className="charts">
           <ChartCard title={`Data delivered ${per}, by source`} series={data} table={table(data, inUnit)} wide>
             <Columns rows={chartRows} x="label" series={data} fmt={inUnit} axisFmt={unitAxis} decimals stacked tipTitle={tipTitle} height={240} />
@@ -453,7 +453,7 @@ function GraphsBody({ g }: { g: GraphData }) {
         </div>
       </StatsGroup>
 
-      <StatsGroup id="streams" title="Streams and processing" help="Streams by delivery method, why streams were transcoded, how long each processing step took, and titles whose streams were corrected.">
+      <StatsGroup id="streams" title="Streams and processing">
         <div className="charts">
           <ChartCard title={`Streams ${per}`} sub="By delivery method" series={streams} table={table(streams, count)}>
             <Columns rows={chartRows} x="label" series={streams} fmt={count} stacked tipTitle={tipTitle} />
@@ -480,7 +480,7 @@ function GraphsBody({ g }: { g: GraphData }) {
         </div>
       </StatsGroup>
 
-      <StatsGroup id="quality" title="Playback quality" help="Interruptions while players waited for data, by period and by client.">
+      <StatsGroup id="quality" title="Playback quality">
         <div className="charts">
           <ChartCard title={`Buffering ${per}`} sub="Playback interruptions while waiting for data" series={one("stalls", "Events")}
             table={table([{ key: "stalls", label: "Events", color: COLORS[0] }], count)}>
@@ -494,7 +494,7 @@ function GraphsBody({ g }: { g: GraphData }) {
         </div>
       </StatsGroup>
 
-      <StatsGroup id="requests" title="Launches and requests" help="Activity launches in Discord, and title requests sent to Seerr by result.">
+      <StatsGroup id="requests" title="Launches and requests">
         <div className="charts">
           <ChartCard title={`Activity launches ${per}`} series={one("launches", "Launches")} table={table(one("launches", "Launches"), count)}>
             <Columns rows={chartRows} x="label" series={one("launches", "Launches")} fmt={count} tipTitle={tipTitle} />
@@ -510,12 +510,11 @@ function GraphsBody({ g }: { g: GraphData }) {
 }
 
 /** A group of the Statistics page's charts under one heading. */
-function StatsGroup({ id, title, help, children }: { id: string; title: string; help: string; children: React.ReactNode }) {
+function StatsGroup({ id, title, children }: { id: string; title: string; children: React.ReactNode }) {
   return (
     <section id={`sec-${id}`} className="stats-group">
       <div className="stats-group-head">
         <h2>{title}</h2>
-        <p className="muted small">{help}</p>
       </div>
       {children}
     </section>
@@ -532,7 +531,7 @@ function ProcessingTimes({ rows }: { rows: NonNullable<GraphData["processing"]> 
       <header className="chart-head">
         <div>
           <h3>Processing times</h3>
-          <p className="muted small chart-sub">Each step the server took to prepare titles and their streams in this period. Failed steps are not included in the times.</p>
+          <p className="muted small chart-sub">Successful steps only</p>
         </div>
       </header>
       {list.length === 0 ? <p className="muted">No processing steps were recorded in this period.</p> : (
@@ -614,7 +613,7 @@ function ByClient({ rows }: { rows: NonNullable<GraphData["clients"]> }) {
       <header className="chart-head">
         <div>
           <h3>Buffering and transcodes by client</h3>
-          <p className="muted small chart-sub">Each viewer's session, by the client it ended on. Dedicated streams are streams created for a single viewer's player.</p>
+          <p className="muted small chart-sub">By the client each session ended on</p>
         </div>
       </header>
       {list.length === 0 ? <p className="muted">No data for this period.</p> : (
@@ -650,8 +649,7 @@ function ProblemFiles({ rows }: { rows: NonNullable<GraphData["problems"]> }) {
       <header className="chart-head">
         <div>
           <h3>Titles with stream corrections</h3>
-          <p className="muted small chart-sub">Audio shorter than the video (padded with silence), streams that ended before the duration Plex reports,
-            subtitles burned into the video, and HDR tone-mapped to SDR. Counted per stream or session.</p>
+          <p className="muted small chart-sub">Padded audio, early stream ends, burned-in subtitles and HDR tone-mapping</p>
         </div>
       </header>
       {rows.length === 0 ? <p className="muted">No stream corrections were recorded in this period.</p> : (
@@ -773,7 +771,8 @@ export function MiniChart({ kind, onError }: { kind: "plays" | "people" | "data"
   );
 }
 
-const LOAD_PERIODS: Array<[string, number]> = [["6 hours", 6], ["24 hours", 24], ["7 days", 168], ["30 days", 720]];
+const LOAD_PERIODS: Array<[string, GraphPeriod]> = [["1 hour", { hours: 1 }], ["6 hours", { hours: 6 }], ["24 hours", { hours: 24 }],
+  ["7 days", { days: 7 }], ["30 days", { days: 30 }], ["90 days", { days: 90 }]];
 const pctText = (n: number) => `${n.toFixed(n >= 10 ? 0 : 1)}%`;
 
 /**
@@ -783,30 +782,51 @@ const pctText = (n: number) => `${n.toFixed(n >= 10 ? 0 : 1)}%`;
  * server's upload. A time the bot was not running is a gap in each line.
  */
 export function SystemLoadPanel({ onError }: { onError: (e: unknown) => void }) {
-  const [span, setSpan] = useState(24);
-  const { data, busy } = useLoad(() => api.systemLoad(span), [span], onError);
+  const [period, setPeriod] = useState<GraphPeriod>({ hours: 24 });
+  const [custom, setCustom] = useState(false);
+  // Each zoom in, to go back out of it one at a time.
+  const [zooms, setZooms] = useState<GraphPeriod[]>([]);
+  const key = JSON.stringify(period);
+  const { data, busy } = useLoad(() => api.systemLoad(period), [key], onError);
+  const preset = LOAD_PERIODS.some(([, p]) => samePeriod(p, period));
+  const pickPeriod = (p: GraphPeriod) => { setZooms([]); setPeriod(p); };
+  const zoom = (from: number, to: number) => { setZooms([...zooms, period]); setPeriod({ from, to }); };
   return (
     <section className="card">
       <div className="panel-head">
-        <div>
-          <h3>Server load</h3>
-          <p className="muted small">The machine's CPU and memory, the bot process's share, and the streams and viewers it served, recorded each minute.</p>
-        </div>
-        <div className="segmented" role="group" aria-label="Period">
-          {LOAD_PERIODS.map(([label, h]) => (
-            <button key={h} type="button" className={span === h ? "on" : ""} aria-pressed={span === h} onClick={() => setSpan(h)}>{label}</button>
+        <h3>Server load</h3>
+        <div className="period" role="group" aria-label="Period">
+          {LOAD_PERIODS.map(([label, p]) => (
+            <button key={label} type="button" className={`chip ${!custom && samePeriod(p, period) ? "on" : ""}`}
+              aria-pressed={!custom && samePeriod(p, period)} onClick={() => { setCustom(false); pickPeriod(p); }}>{label}</button>
           ))}
+          <button type="button" className={`chip ${custom || !preset ? "on" : ""}`} aria-pressed={custom || !preset}
+            onClick={() => setCustom(!custom)}>Custom…</button>
         </div>
       </div>
+      {custom && <CustomPeriod onPick={pickPeriod} />}
+      {data && (
+        <div className="load-shown">
+          <span className="muted small">{dayTime(data.from)} – {data.to >= Date.now() - 60_000 ? "now"
+            : new Date(data.to).toDateString() === new Date(data.from).toDateString() ? shortTime(data.to) : dayTime(data.to)}
+            {` · ${Math.round(data.stepMs / 60_000)} min steps`}</span>
+          {zooms.length > 0 && (
+            <>
+              <button type="button" className="link" onClick={() => { setPeriod(zooms[zooms.length - 1]); setZooms(zooms.slice(0, -1)); }}>Zoom out</button>
+              {zooms.length > 1 && <button type="button" className="link" onClick={() => { setPeriod(zooms[0]); setZooms([]); }}>Reset zoom</button>}
+            </>
+          )}
+        </div>
+      )}
       {!data ? <p className="empty">{busy ? "Loading…" : "The server load could not be loaded."}</p>
-        : <div className={busy ? "stale" : ""}><SystemLoadBody d={data} /></div>}
+        : <div className={busy ? "stale" : ""}><SystemLoadBody d={data} onZoom={zoom} /></div>}
     </section>
   );
 }
 
 type LoadPoint = SystemLoad["points"][number];
 
-function SystemLoadBody({ d }: { d: SystemLoad }) {
+function SystemLoadBody({ d, onZoom }: { d: SystemLoad; onZoom: (from: number, to: number) => void }) {
   if (d.points.length === 0) {
     return <p className="muted">No server load was recorded in this period. Recording starts when this version of the bot starts.</p>;
   }
@@ -859,33 +879,37 @@ function SystemLoadBody({ d }: { d: SystemLoad }) {
           sub={`Average of ${memGb} GB · peak ${memPeak ? pctText(memPeak.v) : "—"}${at(memPeak)}`} />
         <Tile label="Memory, bot process" value={rssNow === null ? "—" : mb(rssNow)} sub={`Latest · peak ${rssPeak ? mb(rssPeak.v) : "—"}${at(rssPeak)}`} />
         <Tile label="Most streams at once" value={streamsPeak ? count(streamsPeak.v) : "None"}
-          sub={`${count(Math.max(0, ...vals("encodes")))} transcodes · ${count(Math.max(0, ...vals("viewers")))} viewers at most`} />
+          sub={(() => {
+            const enc = Math.max(0, ...vals("encodes"));
+            const vw = Math.max(0, ...vals("viewers"));
+            return `${count(enc)} transcode${enc === 1 ? "" : "s"} · ${count(vw)} viewer${vw === 1 ? "" : "s"} at most`;
+          })()} />
         <Tile label="Peak upload" value={sentPeak && sentPeak.v > 0 ? mbit(sentPeak.v / 1e6) : "None"}
           sub={sentPeak && sentPeak.v > 0 ? `Averaged over ${Math.round(d.stepMs / 60_000)} min${at(sentPeak)}` : "No upload was recorded in this period"} />
       </div>
       <div className="charts">
         <ChartCard title="CPU usage" sub="Share of all cores, averaged over each step" series={cpu} table={table(cpu, pctText)}>
-          <Lines rows={rows} series={cpu} from={d.from} to={d.to} max={100} fmt={pctText} axisFmt={(n) => `${n}%`} />
+          <Lines rows={rows} series={cpu} from={d.from} to={d.to} onZoom={onZoom} max={100} fmt={pctText} axisFmt={(n) => `${n}%`} />
         </ChartCard>
         <ChartCard title="Memory usage, machine" sub={`Share of ${memGb} GB in use`} series={one("mem", "Machine")}
           table={table(one("mem", "Machine"), pctText)}>
-          <Lines rows={rows} series={one("mem", "Machine")} from={d.from} to={d.to} max={100} fmt={pctText} axisFmt={(n) => `${n}%`} />
+          <Lines rows={rows} series={one("mem", "Machine")} from={d.from} to={d.to} onZoom={onZoom} max={100} fmt={pctText} axisFmt={(n) => `${n}%`} />
         </ChartCard>
         <ChartCard title="Memory usage, bot process" sub="Resident memory, at most in each step" series={one("rss", "Bot process", COLORS[1])}
           table={table(one("rss", "Bot process", COLORS[1]), mb)}>
-          <Lines rows={rows} series={one("rss", "Bot process", COLORS[1])} from={d.from} to={d.to} fmt={mb} />
+          <Lines rows={rows} series={one("rss", "Bot process", COLORS[1])} from={d.from} to={d.to} onZoom={onZoom} fmt={mb} />
         </ChartCard>
         <ChartCard title="Streams and viewers" sub="At most in each step" series={work} table={table(work, whole)}>
-          <Lines rows={rows} series={work} from={d.from} to={d.to} fmt={whole} curve="stepAfter" />
+          <Lines rows={rows} series={work} from={d.from} to={d.to} onZoom={onZoom} fmt={whole} curve="stepAfter" />
         </ChartCard>
         <ChartCard title="Server upload" sub="All data the bot's port sent, averaged over each step" series={one("sent", "Upload")}
           table={table(one("sent", "Upload"), mbit)}>
-          <Lines rows={rows} series={one("sent", "Upload")} from={d.from} to={d.to} fmt={mbit} axisFmt={(n) => `${count(n)} Mbps`} />
+          <Lines rows={rows} series={one("sent", "Upload")} from={d.from} to={d.to} onZoom={onZoom} fmt={mbit} axisFmt={(n) => `${count(n)} Mbps`} />
         </ChartCard>
         {hasLoad && (
           <ChartCard title="Load average" sub={`One-minute load average; the dashed line marks the number of cores (${d.cores})`}
             series={one("load", "Load average")} table={table(one("load", "Load average"), (n) => n.toFixed(2))}>
-            <Lines rows={rows} series={one("load", "Load average")} from={d.from} to={d.to} fmt={(n) => n.toFixed(2)} axisFmt={count}
+            <Lines rows={rows} series={one("load", "Load average")} from={d.from} to={d.to} onZoom={onZoom} fmt={(n) => n.toFixed(2)} axisFmt={count}
               threshold={{ value: d.cores, label: `${d.cores} cores` }} />
           </ChartCard>
         )}

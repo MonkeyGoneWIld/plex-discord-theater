@@ -1596,6 +1596,107 @@ console.log("\n— a host alone who closes the Activity and opens it again carri
   await sleep(HOLD_MS + 200);
 }
 
+console.log("\n— a viewer who opens the Activity again after everybody left carries the room on —");
+{
+  // 18 November: the host out last, the room held for them; a viewer opened the
+  // Activity again 20 s later, in a new instance, and the held room was ended
+  // at the end of its hold — the film started over.
+  const at = (hostUserId: string, channelId: string) => ({ hostUserId, guildId: "g-vback", channelId, createdAt: Date.now() });
+  instanceHosts.set("inst-vback-1", at("u-host", "c-vback"));
+  const host = new Client("u-host", "host");
+  await host.connect("inst-vback-1");
+  const a = new Client("u-a", "a");
+  await a.connect("inst-vback-1");
+  const sid = await startPlayback(host);
+  host.send({ type: "heartbeat", position: 700, playing: true, waiting: false, transportRevision: host.last("transport-state")?.transportRevision });
+  await sleep(60);
+  a.close();
+  await sleep(100);
+  host.close();
+  await sleep(100);
+  // Registering the new instance deletes the old one's record first.
+  instanceHosts.delete("inst-vback-1");
+  instanceHosts.set("inst-vback-2", at("u-a", "c-vback"));
+  const back = new Client("u-a", "a");
+  await back.connect("inst-vback-2");
+  const st = back.last("state");
+  check("the viewer opening it again in the same channel is on the same film and stream", [st?.ratingKey, st?.hlsSessionId], ["100", sid]);
+  check("where it was left", near(st?.position ?? -1, 700, 1), "ok");
+  check("as host, driving the stream", [back.last("participants")?.participants?.find((p: Msg) => p.userId === "u-a")?.isHost, st?.variant?.isOwner], [true, true]);
+  back.send({ type: "heartbeat", position: 700, playing: true, waiting: false, transportRevision: back.last("transport-state")?.transportRevision });
+  await sleep(1000);
+  check("and running from there once their picture is ready", near(await clockOf("inst-vback-2"), 701, 0.6), "ok");
+  await sleep(HOLD_MS + 200);
+  check("and it isn't ended when the hold runs out", (await clockOf("inst-vback-2")) > 0, true);
+  back.close();
+  await sleep(100);
+  // Somebody who was never in it, opening the Activity in that channel: a room of their own.
+  instanceHosts.delete("inst-vback-2");
+  instanceHosts.set("inst-vback-3", at("u-z", "c-vback"));
+  const stranger = new Client("u-z", "z");
+  await stranger.connect("inst-vback-3");
+  check("somebody who wasn't in it starts afresh", stranger.last("state")?.ratingKey ?? null, null);
+  stranger.close();
+  await sleep(HOLD_MS + 200);
+}
+
+console.log("\n— a viewer back first to a held room takes it on at once —");
+{
+  // The same instance still open: the viewer back with nobody else there no
+  // longer waits out the hold for the host.
+  const [host, a] = await room("inst-vfirst", ["host", "a"]);
+  const sid = await startPlayback(host);
+  host.send({ type: "heartbeat", position: 300, playing: true, waiting: false, transportRevision: host.last("transport-state")?.transportRevision });
+  await sleep(60);
+  a.close();
+  await sleep(100);
+  host.close();
+  await sleep(100);
+  const back = new Client("u-a", "a");
+  await back.connect("inst-vfirst");
+  const st = back.last("state");
+  check("back first, on the same film and stream", [st?.ratingKey, st?.hlsSessionId], ["100", sid]);
+  check("as host at once, driving it", [back.last("participants")?.participants?.find((p: Msg) => p.userId === "u-a")?.isHost, st?.variant?.isOwner], [true, true]);
+  back.send({ type: "heartbeat", position: 300, playing: true, waiting: false, transportRevision: back.last("transport-state")?.transportRevision });
+  await sleep(500);
+  check("running before the hold would have run out", near(await clockOf("inst-vfirst"), 300.5, 0.4), "ok");
+  const later = new Client("u-host", "host");
+  await later.connect("inst-vfirst");
+  check("the host back later joins it, not a second host", later.last("participants")?.participants?.filter((p: Msg) => p.isHost).map((p: Msg) => p.userId), ["u-a"]);
+  [back, later].forEach((x) => x.close());
+  await sleep(HOLD_MS + 200);
+}
+
+console.log("\n— a host's heartbeat that arrives late is counted on from when it was sent —");
+{
+  // 18 November: one 7 s in arriving took the room back 7.7 s; a viewer held
+  // there for it, then jumped 7 s on again.
+  const [host] = await room("inst-late", ["host"]);
+  await startPlayback(host);
+  const beat = (position: number, extra: Msg) => host.send({ type: "heartbeat", position, playing: true, waiting: false,
+    transportRevision: host.last("transport-state")?.transportRevision, ...extra });
+  beat(500, {});
+  await sleep(60);
+  beat(500, { sentAt: Date.now() - 4000 });
+  await sleep(60);
+  check("sent 4 s before it arrived, the room is where the host is now", near(await clockOf("inst-late"), 504.1, 0.3), "ok");
+  beat(600, { sentAt: Date.now() - 200 });
+  await sleep(60);
+  check("on time, it is taken as it is", near(await clockOf("inst-late"), 600.1, 0.3), "ok");
+  beat(700, { sentAt: Date.now() - 120_000 });
+  await sleep(60);
+  check("a stamp too far back isn't believed", near(await clockOf("inst-late"), 700.1, 0.3), "ok");
+  beat(800, {});
+  await sleep(60);
+  check("without a stamp, as before", near(await clockOf("inst-late"), 800.1, 0.3), "ok");
+  host.send({ type: "heartbeat", position: 900, playing: true, waiting: true, sentAt: Date.now() - 4000,
+    transportRevision: host.last("transport-state")?.transportRevision });
+  await sleep(60);
+  check("a host whose picture isn't moving is where it says", near(await clockOf("inst-late"), 900, 0.3), "ok");
+  host.close();
+  await sleep(HOLD_MS + 200);
+}
+
 console.log("\n— a viewer's own stream, kept for them, still goes in time when the room moves —");
 {
   // The viewer steps out (their stream kept for AWAY_HOLD_MS), then the host

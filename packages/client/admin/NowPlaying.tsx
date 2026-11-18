@@ -158,8 +158,7 @@ function LiveTimeline({ room, tracks, durationS }: { room: Room; tracks: Record<
   if (!playId) return null;
   return (
     <div className="session-block">
-      <BlockHead title="Session timeline"
-        help="Playback, position, streams, viewers, data delivered and player health on one time axis, refreshed every 10 seconds. Hover over or tap the chart for the values at that moment.">
+      <BlockHead title="Session timeline">
         <a className="small" href={`#history/${playId}`}>Open in History →</a>
       </BlockHead>
       {data && data.play.id === playId
@@ -336,15 +335,13 @@ function Session({ room, durationS, sub, tracks }: { room: Room; durationS: numb
       )}
 
       <div className="session-block">
-        <BlockHead title={`Viewers (${room.clients.length})`}
-          help="Each viewer's status, stream, sync offset from the session position and buffer, updated live. Select a viewer for their client, formats and data totals." />
+        <BlockHead title={`Viewers (${room.clients.length})`} />
         <Viewers room={room} tracks={tracks} />
       </div>
 
       {room.streams.length > 0 && (
         <div className="session-block">
-          <BlockHead title={`Streams (${room.streams.length})`}
-            help="Each stream the server is sending: whether it is played directly or transcoded and why, its tracks, progress and viewers." />
+          <BlockHead title={`Streams (${room.streams.length})`} />
           {room.streams.map((s, i) => <StreamCard key={s.variantKey} s={infoOf(room, s, i + 1, tracks)} />)}
         </div>
       )}
@@ -353,14 +350,14 @@ function Session({ room, durationS, sub, tracks }: { room: Room; durationS: numb
 
       {recorded && (room.shares?.length ?? 0) > 0 && (
         <div className="session-block">
-          <BlockHead title="Peer-to-peer sharing" help="Video data relayed from one viewer's player to another in this session." />
+          <BlockHead title="Peer-to-peer sharing" />
           <ShareList shares={room.shares ?? []} nameOf={(id) => nameOf(room, id)} />
         </div>
       )}
 
       {room.queue.length > 0 && (
         <div className="session-block">
-          <BlockHead title={`Queue (${room.queue.length})`} help="Titles that start in this order when the current one ends." />
+          <BlockHead title={`Queue (${room.queue.length})`} />
           <ol className="queue-list">{room.queue.map((q, i) => <li key={`${q.ratingKey}-${i}`}>{q.title} <span className="muted">{q.type}</span></li>)}</ol>
         </div>
       )}
@@ -419,7 +416,7 @@ export function NowPlaying({ data }: { data: Overview | null }) {
     <>
       <div className="page-head">
         <h1>Activity</h1>
-        <p className="muted">Active rooms and their sessions, updated live. Times are shown in your local time zone ({zoneLabel()}).</p>
+        <p className="muted">Times in your local time zone ({zoneLabel()}).</p>
       </div>
       <div className={`stats${recorded ? " six" : ""}`}>
         <Stat icon={<Icon name="now" />} label="Active sessions" value={playing.length}

@@ -94,7 +94,8 @@ are active.
    peers), and buffering in green, amber or red.
 3. **Viewers.** Each viewer's role and client (the Discord desktop app, the
    Discord app on a phone, Vesktop, or a browser, with the operating system),
-   status, stream, sync offset from the session position, buffer in seconds
+   status, stream, sync offset from the session position to a hundredth of a
+   second (as the player's Stats show it), buffer in seconds
    with its trend (amber under 10 seconds), watch time, data received with
    its split, data sent to peers, and buffering. Status is the player's last
    report: watching, loading (at the start or after a seek), buffering and
@@ -193,19 +194,24 @@ cause in another. For a long session, **Whole session**, **Last 30 min** and
 - **Viewers:** one row per viewer, coloured by role (host, co-host or
   viewer), with their roles summarised under the name, and buffering,
   loading and time away from Discord marked on the row.
-- **Delivery and player health:** the data delivered to the players by
-  source (server, Discord cache, peers), each viewer's sync offset with the
-  ±2 second tolerance, each viewer's buffer on a fixed scale of 0 to 150
-  seconds (the most a player fetches ahead) with a line every 30 seconds and
-  the 10 second low mark, and dropped frames.
+- **Data delivered:** the data delivered to the players by source (server,
+  Discord cache, peers), with the required bitrate as a dashed line: the
+  combined bitrate of the streams the viewers were on while the session
+  played.
+- **Player health:** each viewer's sync offset with the ±2 second tolerance,
+  each viewer's buffer on a fixed scale of 0 to 150 seconds (the most a
+  player fetches ahead) with a line every 30 seconds and the 10 second low
+  mark, and dropped frames, with a line for every viewer once any of them
+  dropped a frame.
 
 Each section's colour key is under its own rows.
 
 Hover over or tap the chart for a line across every row and the values at
-that moment, in sections: **Session** (playback and the position),
-**Streams**, **Data delivered** by source, **Viewers** (each viewer's role,
-status, stream, sync offset, buffer and dropped frames) and **Events** near
-that moment. On a phone the readout sits under the chart, each viewer on two
+that moment, in sections: **Events** near that moment, each with the mark it
+has on the chart and the one under the pointer highlighted; **Session**
+(playback and the position); **Streams**; **Data delivered** by source and
+the required bitrate; and **Viewers** (each viewer's role, status, stream,
+sync offset, buffer and dropped frames). On a phone the readout sits under the chart, each viewer on two
 lines. Hover any bar, line or mark for its details. Where labels would
 overlap, as on a phone, some are left to their mark's hover.
 
@@ -333,8 +339,13 @@ whole file** clears that.
 ## System
 
 - **Status.** Version, uptime, memory and platform.
-- **Server load.** Recorded each minute and shown over the last 6 hours,
-  24 hours, 7 days or 30 days: CPU usage of the machine and of the bot
+- **Server load.** Recorded each minute and shown over the last hour, 6 hours,
+  24 hours, 7 days, 30 days or 90 days, or a custom period (**Custom…**: the
+  last so many hours or days, a date range or a time range). Drag across any
+  chart with the mouse to zoom into that stretch, down to 10 minutes in
+  one-minute steps; **Zoom out** goes back one zoom and **Reset zoom** to the
+  period chosen. The period shown and its step are above the figures. The
+  charts: CPU usage of the machine and of the bot
   process, memory usage of the machine and of the bot process, streams and
   viewers, the server's upload, and the load average (Linux only, with a line
   at the number of CPU cores). Figures above the charts give each measure's
@@ -407,7 +418,7 @@ A signed-in browser can read everything as files or JSON.
 | `/api/requests` | Title requests, with Seerr's current status |
 | `/api/caches` | Each cache and what it holds |
 | `/api/graphs` | Statistics by hour or day, and the server's upload. `?days=` is the period: 30 unless given, 0 for all time. `?hours=` is the last so many hours instead, and `?from=` with `?to=`, in milliseconds since 1970, a period of its own. `?tz=` is the time zone the days, hours and weekdays are in, such as `Europe/London`: UTC unless given. |
-| `/api/system-load` | The server's load by minute. `?hours=` is the period: 24 unless given, at most 2160. |
+| `/api/system-load` | The server's load by minute. `?hours=` or `?days=` is the period up to now (24 hours unless given, at most 90 days), or `?from=` and `?to=` (epoch milliseconds) a period within the last 90 days, 10 minutes at the least. |
 | `/api/export/<list>.csv`, `.json` | `history`, `people`, `usage` or `requests`, as a file. `?q=` is the list's search. At most 200,000 rows. |
 | `/api/export/admin.sqlite` | A copy of the whole history database |
 

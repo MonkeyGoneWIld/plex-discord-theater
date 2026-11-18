@@ -17,7 +17,9 @@
   --bad: #f26d6d;
   --bad-soft: #3b1a1a;
   --info: #5db2ec;
-  /* A co-host's stretch on the session chart; a host's is --brand. */
+  /* A host's and a co-host's stretch on the session chart: the host's in the text colour, apart from every
+     status colour (OKLab ΔE ≥ 24, ≥ 22 under colour-vision deficiency). */
+  --host: #f5f5f4;
   --cohost: #b18cf5;
   --info-soft: #12293a;
   /* Where data came from, in this order everywhere: the server, Discord's cache, other viewers
@@ -50,6 +52,7 @@
     --bad: #c22f2f;
     --bad-soft: #fbe6e6;
     --info: #1b6fa8;
+    --host: #1c2128;
     --cohost: #7a4fd6;
     --info-soft: #e2f0fa;
     --series-1: #2a78d6;
@@ -437,7 +440,7 @@ a.fact, .fact a { color: var(--accent); }
 .person { display: flex; align-items: center; gap: 10px; }
 .person > span:last-child { display: flex; flex-direction: column; line-height: 1.25; }
 .role { font-size: 11.5px; color: var(--muted); }
-.role.host { color: var(--brand); font-weight: 600; }
+.role.host { color: var(--host); font-weight: 600; }
 .role.co-host { color: var(--info); }
 /* The client a viewer is on, under their role: one line of its own. */
 .viewer-client { font-size: 11.5px; color: var(--muted); white-space: nowrap; }
@@ -592,7 +595,7 @@ a.fact, .fact a { color: var(--accent); }
 .lane-seg.present { background: var(--accent-soft); border: 1px solid var(--accent); }
 /* While a viewer was host or co-host: a line along the foot of their bar. */
 .lane-seg.role-host, .lane-seg.role-cohost { top: auto; bottom: 1px; height: 5px; padding: 0; border-radius: 3px; z-index: 1; min-width: 2px; }
-.lane-seg.role-host { background: var(--brand); }
+.lane-seg.role-host { background: var(--host); }
 .lane-seg.role-cohost { background: var(--cohost); }
 .lane-mark {
   position: absolute; top: -2px; bottom: -2px; width: 3px; margin-left: -1px; border-radius: 2px; z-index: 2;
@@ -683,6 +686,11 @@ a.fact, .fact a { color: var(--accent); }
 @media (max-width: 640px) {
   .poster.lg { width: 110px; height: 165px; }
   .lane { grid-template-columns: 96px minmax(0, 1fr); gap: 8px; }
+  /* No room beside its times for the label and its toggle: they go above, the track stays in line with the others. */
+  .lane-position:has(.chip-toggle) { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  .lane-position:has(.chip-toggle) .lane-label { flex-direction: row; align-items: center; gap: 10px; }
+  .lane-position:has(.chip-toggle) .chip-toggle { margin-top: 0; }
+  .lane-position:has(.chip-toggle) .lane-track { margin-left: 104px; }
   .moment { grid-template-columns: auto minmax(0, 1fr); }
   .moment-time { grid-column: 2; padding: 0; }
   .config-group summary .muted { display: none; }
@@ -711,3 +719,78 @@ a.fact, .fact a { color: var(--accent); }
 }
 
 .charts h5 { margin: 6px 0 0; font-size: 12.5px; font-weight: 600; color: var(--muted); }
+
+/* Session chart: away from Discord, the hover line, each viewer's position, coverage by delivery. */
+.session-chart { position: relative; }
+.lane-seg.away {
+  background: repeating-linear-gradient(135deg, var(--surface-3) 0 4px, transparent 4px 8px);
+  border: 1px dashed var(--muted); color: var(--muted); opacity: .9;
+}
+.swatch.away-key { background: repeating-linear-gradient(135deg, var(--muted) 0 2px, transparent 2px 4px); border: 1px solid var(--muted); }
+.chart-hover-line { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--muted); pointer-events: none; z-index: 4; }
+.chart-hover-tip {
+  position: absolute; top: 0; z-index: 5; pointer-events: none; margin-left: 10px; max-width: min(360px, 70vw);
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
+  font-size: 12.5px; box-shadow: 0 4px 16px rgba(0, 0, 0, .14);
+}
+.chart-hover-tip.left { transform: translateX(-100%); margin-left: -10px; }
+.chart-hover-tip dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 10px; margin: 4px 0 0; }
+.chart-hover-tip dt { color: var(--muted); white-space: nowrap; }
+.chart-hover-tip dd { margin: 0; overflow-wrap: anywhere; }
+.session-chart.compact { margin-top: 8px; gap: 4px; }
+.session-chart.compact .lane-track { height: 20px; }
+.session-chart.compact .lane-position .lane-track { height: 80px; }
+/* With each viewer's line drawn, the room's is the text colour: the third viewer's green is too near playing's. */
+.position-track.with-viewers .position-line:not(.paused) { stroke: var(--text); }
+.swatch.stripe { height: 4px; vertical-align: 2px; }
+.swatch.line { width: 14px; height: 2px; vertical-align: 3px; }
+.position-viewer { fill: none; stroke-width: 1.5; vector-effect: non-scaling-stroke; stroke-linejoin: round; opacity: .9; }
+.position-dot {
+  position: absolute; width: 8px; height: 8px; border-radius: 50%; transform: translate(-50%, -50%); z-index: 3; pointer-events: none;
+  background: var(--good); box-shadow: 0 0 0 2px var(--surface);
+}
+.chip-toggle {
+  display: inline-block; margin-top: 6px; background: transparent; color: var(--muted); border: 1px solid var(--border);
+  border-radius: 999px; padding: 2px 9px; font-size: 11.5px; font-weight: 500; width: fit-content;
+}
+.chip-toggle.on { background: var(--accent-soft); color: var(--text); border-color: var(--accent); }
+.lane-seg.watched.direct { background: var(--good); }
+.lane-seg.watched.transcoded { background: var(--warn); }
+
+/* History: pauses and loading side by side, data sources over time, the logs window. */
+.cards-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); gap: 16px; }
+.cards-2 > .card { margin: 0; min-width: 0; }
+.pause-at { display: block; white-space: nowrap; }
+.table tr.total-row td { font-weight: 600; border-top: 1px solid var(--border); }
+.sources-time { margin-top: 14px; }
+.sources-time > p { margin: 0 0 6px; }
+.log-window { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; margin: 10px 0 0; }
+
+/* Now Playing: encoding progress, sync and what each player has ahead. */
+.stream-progress { color: var(--muted); font-size: 12.5px; }
+.ahead-cell { display: inline-flex; align-items: center; gap: 8px; }
+.ahead-cell .spark { width: 56px; flex: none; }
+.sync-charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr)); gap: 16px; margin-top: 10px; }
+.live-lines { min-width: 0; }
+.live-lines-head { display: flex; justify-content: space-between; gap: 8px; font-size: 12.5px; font-weight: 600; margin-bottom: 4px; }
+.live-plot { position: relative; height: 110px; border-bottom: 1px solid var(--axis); }
+.live-plot svg { display: block; width: 100%; height: 100%; }
+.live-band { fill: var(--good-soft); }
+.live-zero { stroke: var(--axis); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.live-line { fill: none; stroke-width: 2; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
+.live-tip { position: absolute; top: 4px; margin-left: 10px; z-index: 2; pointer-events: none; }
+.live-tip.left { transform: translateX(-100%); margin-left: -10px; }
+
+/* Statistics: sessions by weekday and hour. */
+.heatmap { margin-top: 12px; overflow-x: auto; }
+.heat-grid { display: grid; grid-template-columns: 34px repeat(24, minmax(9px, 1fr)); gap: 2px; min-width: 300px; }
+.heat-cell { aspect-ratio: 1; border-radius: 2px; min-height: 9px; }
+.heat-cell.none { background: var(--surface-2); }
+.heat-hour { font-size: 10.5px; color: var(--muted); font-family: var(--mono); white-space: nowrap; }
+.heat-day { font-size: 11.5px; color: var(--muted); align-self: center; }
+.heat-key { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 12px; color: var(--muted); }
+.heat-ramp { width: 120px; height: 8px; border-radius: 4px; background: linear-gradient(90deg, color-mix(in oklab, var(--series-1) 20%, var(--surface-2)), var(--series-1)); }
+
+/* A person's time as host, co-host and viewer. */
+.role-split { display: flex; gap: 2px; height: 8px; margin-top: 8px; border-radius: 4px; overflow: hidden; background: var(--surface-2); }
+.role-split > span { display: block; height: 100%; min-width: 2px; }

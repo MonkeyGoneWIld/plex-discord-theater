@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import type { Notes } from "./types";
+import type { Notes, StreamProgress } from "./types";
 import { ago, clock, quality, rate, dateTime, timeOfDay } from "./format";
 import { decisionOf, NOTE_LABELS } from "./parts";
 import { trackName } from "./events";
@@ -42,6 +42,31 @@ export interface StreamInfo {
   peakViewers?: number;
   /** The title's tracks' names, by Plex stream id. */
   tracks?: Record<string, string> | null;
+  /** Now Playing, a stream made here: how fast it is made, and on what. */
+  progress?: StreamProgress | null;
+}
+
+/** "GPU video 34%", the busiest engine; "CPU 1.2 cores". */
+function useText(p: StreamProgress): string | null {
+  const parts: string[] = [];
+  const top = p.gpu?.[0];
+  if (top) parts.push(`GPU ${top.engine} ${Math.round(top.share * 100)}%`);
+  else if (p.encode && p.gpu && p.gpu.length === 0) parts.push("no GPU (CPU encode)");
+  if (p.cores !== null) parts.push(`CPU ${p.cores} ${p.cores === 1 ? "core" : "cores"}`);
+  return parts.length ? parts.join(" · ") : null;
+}
+
+/** How a stream made here is going, in a line: its speed against real time, how far ahead of the watcher, what it uses. */
+export function progressText(p: StreamProgress): string {
+  const use = useText(p);
+  const ahead = `${clock(Math.max(0, p.aheadS))} ahead of the watcher`;
+  const what = p.encode ? "Encoding" : "Copying";
+  const said = p.state === "made" ? `${what} done: made to the end of the file`
+    : p.state === "failed" ? `${what} stopped with an error`
+      : p.state === "paused" ? `${what} paused, far enough ahead (${ahead})`
+        : p.state === "giving way" ? `${what} paused while another stream starts`
+          : `${what} at ${(p.recentX ?? p.speedX).toFixed(1)}× real time · ${ahead}`;
+  return use && p.state === "making" ? `${said} · ${use}` : said;
 }
 
 /** "4K", "1080p": a picture's size as people say it, from "3840×2160". */
@@ -136,6 +161,7 @@ export function StreamCard({ s }: { s: StreamInfo }) {
             <span className="stream-why muted">{s.started ? "Waiting for the stream's first playlist." : "No viewer has started this stream."}</span>
           )}
           {transcoded && <span className="stream-reason warn"><Icon name="alert" size={14} />Video transcoded: {s.reason ?? "no reason was reported"}</span>}
+          {s.progress && <span className="stream-progress"><Icon name="pulse" size={14} />{progressText(s.progress)}</span>}
           {!transcoded && audioConverted && n.audioReason
             ? <span className="stream-reason"><Icon name="alert" size={14} />Audio converted: {String(n.audioReason)}</span> : null}
         </span>
@@ -169,6 +195,12 @@ export function StreamCard({ s }: { s: StreamInfo }) {
           </Group>
           <Group icon="upload" title="Delivery">
             {row("Engine", s.engine === "ffmpeg" ? "FFmpeg" : s.engine === "plex" ? "Plex" : "—")}
+            {s.progress && <>
+              {row(s.progress.encode ? "Encoding speed" : "Copying speed", `${(s.progress.recentX ?? s.progress.speedX).toFixed(1)}× real time lately · ${s.progress.speedX.toFixed(1)}× since it started`)}
+              {row("Made ahead of the watcher", clock(Math.max(0, s.progress.aheadS)))}
+              {row("Server load", useText(s.progress) ?? "Not readable here")}
+            </>}
+            {s.progress === null && s.engine === "plex" && s.started && row("Encoding speed", "Plex doesn't report it")}
             {row("Stream bitrate", `${rate(s.kbps)}${s.kbpsSource ? ` (${s.kbpsSource})` : ""}`)}
             {row("Quality limit", quality(s.quality ?? 0))}
             {row("Requested by", <>{s.ownerName ?? "The room"} <span className="mono muted">{s.ownerUserId ?? ""}</span></>)}

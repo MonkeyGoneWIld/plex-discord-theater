@@ -37,7 +37,7 @@ export const api = {
   overview: () => call<Overview>("/api/overview"),
   titles: (keys: string[]) => call<{ titles: Record<string, TitleInfo | null> }>(`/api/titles${qs({ keys: keys.join(",") })}`),
   logFiles: () => call<{ files: LogFile[] }>("/api/logs/files"),
-  logs: (q: { file?: string; q?: string; level?: string; tag?: string; limit?: number }) => {
+  logs: (q: { file?: string; q?: string; level?: string; tag?: string; limit?: number; from?: number; to?: number }) => {
     const p = new URLSearchParams();
     for (const [k, v] of Object.entries(q)) if (v !== undefined && v !== "") p.set(k, String(v));
     return call<LogResult>(`/api/logs?${p}`);

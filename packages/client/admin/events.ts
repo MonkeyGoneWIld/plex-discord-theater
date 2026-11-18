@@ -21,7 +21,8 @@ const GROUPS: Record<string, EventGroup> = {
   play: "playback", pause: "playback", resume: "playback", seek: "playback", stop: "playback", ended: "playback",
   "reached the end": "playback",
   joined: "people", "came back": "people", "switched client": "people", left: "people", "away from Discord": "people", "back in Discord": "people",
-  role: "people",
+  role: "people", "asked for host": "people", "request declined": "people", "request ended": "people",
+  "short sound": "streams",
   "stream started": "streams", "stream restarted": "streams", "stream ended": "streams", "stream changed": "streams",
   subtitles: "streams", quality: "streams",
   buffering: "problems", "loaded after seek": "problems", "loaded at start": "problems", "player error": "problems",
@@ -221,6 +222,14 @@ export function eventText(e: PlayEvent, ctx?: EventContext): string {
     case "away from Discord": return `${who} switched away from the Discord window`;
     case "back in Discord": return `${who} returned to the Discord window`;
     case "role": return roleText(who, d);
+    case "asked for host": return `${who} requested host${d.host ? ` from ${String(d.host)}` : ""}`
+      + `${d.away ? `, who was away from the Discord window` : ""}`;
+    case "request declined": return `${d.host ? String(d.host) : "The host"} declined ${who}'s request for host`;
+    case "request ended": return d.why === "asker left"
+      ? `${who}'s request for host ended: they left before ${d.host ? String(d.host) : "the host"} answered`
+      : `${who}'s request for host ended: the host role moved before ${d.host ? String(d.host) : "the host"} answered`;
+    case "short sound": return `The sound stops at ${clock(Number(d.soundEndsS))}, before the picture ends at ${clock(Number(d.pictureEndsS))}: `
+      + "it was read on its own and filled with silence to the end";
     case "stream changed": {
       const on = `${streamLabel(ctx, d.to)} (${tracksOf(ctx, d.to, d)})`;
       // Joining, or a new title: the stream they start on.
@@ -269,7 +278,11 @@ const DETAIL_LABELS: Record<string, string> = {
   subtitleStreamId: "Subtitles", quality: "Quality", engine: "Engine", fromOffsetS: "Previous start", toOffsetS: "New start",
   offsetS: "Starts at", msg: "Message", tag: "Source", session: "Stream session", replaced: "Replaced session",
   device: "Client", caps: "Supported formats", by: "Host before", target: "Host after", away: "Host away from Discord",
+  waitS: "Time to answer", soundEndsS: "Sound ends at", pictureEndsS: "Picture ends at", ratingKey: "Plex item",
 };
+/** Why a request for host ended with no answer. */
+const REQUEST_ENDED: Record<string, string> = { "asker left": "They left before it was answered", "host changed": "The host role moved first" };
+
 /** For a change of host or co-host, its details' labels where they differ. */
 const ROLE_LABELS: Record<string, string> = { why: "How" };
 
@@ -281,7 +294,7 @@ function roleLabel(k: string, d: Record<string, unknown>): string | undefined {
   return ROLE_LABELS[k] ?? DETAIL_LABELS[k];
 }
 
-const AS_IS = new Set(["askedBy", "host", "next", "msg", "tag", "session", "replaced", "summary", "engine", "by", "target"]);
+const AS_IS = new Set(["askedBy", "host", "next", "msg", "tag", "session", "replaced", "summary", "engine", "by", "target", "ratingKey"]);
 
 /** An event's detail as labelled rows: what the expanded event shows. */
 export function eventDetails(e: PlayEvent, ctx?: EventContext): Array<[string, string]> {
@@ -306,11 +319,13 @@ function detailValue(kind: string, k: string, v: unknown, ctx?: EventContext): s
   switch (k) {
     case "fromS": case "toS": case "breakAtS": case "fromOffsetS": case "toOffsetS": case "offsetS": return clock(Number(v));
     case "ms": return secs(v);
+    case "waitS": return `${Number(v)} s`;
+    case "soundEndsS": case "pictureEndsS": return clock(Number(v));
     case "role": return role(v);
     case "reachedEnd": return v ? "Yes" : "No";
     case "cause": return SEEK_CAUSES[String(v)] ?? PLAY_CAUSES[String(v)] ?? STOP_CAUSES[String(v)] ?? (v === "finished" ? "The title finished" : String(v));
     case "reason": return kind === "ended" ? (END_REASONS[String(v)] ?? String(v)) : WAITED_FOR[String(v)] ?? String(v);
-    case "why": return ROLE_WHY[String(v)] ?? WAITED_FOR[String(v)] ?? switchedText(v) ?? String(v);
+    case "why": return ROLE_WHY[String(v)] ?? REQUEST_ENDED[String(v)] ?? WAITED_FOR[String(v)] ?? switchedText(v) ?? String(v);
     case "away": return v ? "Yes" : "No";
     case "switching": return switchedText(v) ?? String(v);
     case "variant": return streamLabel(ctx, v);

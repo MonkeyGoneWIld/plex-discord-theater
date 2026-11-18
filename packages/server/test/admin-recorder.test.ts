@@ -572,8 +572,12 @@ console.log("\n— loading the start, buffering, a seek; the host changing the a
     data: { posS: rn.positionS, paused: false, seeking: false, readyState: 3, ...o } });
   const say = (userId: string, ...entries: Any[]) => nr.clientLog({ at: n, userId, clientId: `page${userId}`,
     entries: entries as unknown as Parameters<typeof nr.clientLog>[0]["entries"] });
-  const liveOf = (userId: string) => nr.annotate({ at: n, totals: {}, rooms: [structuredClone(rn)] } as unknown as Overview)
-    .rooms[0].clients.find((c) => c.userId === userId)?.player;
+  // What Now Playing says of a player's loading and buffering (its sync and buffer are checked in admin-insights.test.ts).
+  const liveOf = (userId: string) => {
+    const p = nr.annotate({ at: n, totals: {}, rooms: [structuredClone(rn)] } as unknown as Overview)
+      .rooms[0].clients.find((c) => c.userId === userId)?.player;
+    return p ? { stall: p.stall, sinceMs: p.sinceMs } : p;
+  };
   const evs = () => nr.play(pid)!.events;
   nr.transport({ at: n, roomId: "RN", type: "play", userId: "711", username: "hostess", role: "host", fromS: 0, toS: 0,
     ratingKey: "90001", title: "Verity" });

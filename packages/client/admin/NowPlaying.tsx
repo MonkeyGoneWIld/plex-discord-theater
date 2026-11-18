@@ -1,6 +1,8 @@
-import { useState } from "react";
-import type { Client, Overview, Room, Stream } from "./types";
-import { ago, bytes, clock, dateTime, quality, rate, zoneLabel } from "./format";
+import { useEffect, useState } from "react";
+import type { Client, Overview, PlayDetail, Room, Stream } from "./types";
+import { api } from "./api";
+import { drift, SessionChart } from "./timeline";
+import { ago, bytes, clock, dateTime, quality, rate, timeOfDay, zoneLabel } from "./format";
 import { BufferingCell, bufferingTone, DataCell, DecisionBadge, PlaceName } from "./parts";
 import { switchedText, trackName } from "./events";
 import { clientName, formatsText } from "./clients";
@@ -84,6 +86,7 @@ function infoOf(room: Room, stream: Stream, n: number, tracks: Record<string, st
     ownerName: stream.ownerUserId ? nameOf(room, stream.ownerUserId) : null, ownerUserId: stream.ownerUserId, offsetS: stream.sessionOffset,
     isHostStream: stream.isHostStream, viewers: stream.viewers.map((id) => ({ id, name: nameOf(room, id) })), idleS: stream.idleS,
     plexTranscodeKey: stream.plexTranscodeKey, plexClientId: stream.plexClientId, notesAt: stream.notesAt, tracks,
+    progress: stream.progress ?? null,
   };
 }
 
@@ -104,8 +107,149 @@ function status(c: Client): { text: string; tone: string } {
   if (p?.stall === "seek") return { text: `Loading after seek${forS(p.sinceMs)}`, tone: "muted" };
   // Not recorded: only the room's word, that they have under 15 s in hand.
   if (p === undefined && c.loading) return { text: "Loading", tone: "muted" };
+  if (c.watching && c.role !== "host" && typeof p?.driftS === "number" && Math.abs(p.driftS) > OUT_OF_SYNC_S) {
+    return { text: "Out of sync", tone: "warn" };
+  }
   if (c.watching) return { text: "Watching", tone: "good" };
   return { text: "Browsing", tone: "muted" };
+}
+
+/** Past this far from the room a player corrects itself (client Player.tsx DRIFT_THRESHOLD_S): out of sync. */
+const OUT_OF_SYNC_S = 2;
+
+/** Up to three viewers' lines get a colour each; the rest share one. */
+const LINE_COLORS = ["var(--series-1)", "var(--series-2)", "var(--series-3)"];
+const lineColor = (i: number) => LINE_COLORS[i] ?? "var(--muted)";
+
+function SyncCell({ c }: { c: Client }) {
+  const p = c.player;
+  if (c.role === "host") return <span className="muted">Host</span>;
+  if (typeof p?.driftS !== "number") return <span className="muted">—</span>;
+  const off = Math.abs(p.driftS) > OUT_OF_SYNC_S;
+  return <span className={off ? "warn-text" : ""}>{drift(p.driftS)}</span>;
+}
+
+function AheadCell({ c }: { c: Client }) {
+  const p = c.player;
+  if (typeof p?.aheadS !== "number") return <span className="muted">—</span>;
+  const values = (p.health ?? []).map((h) => h[2]).filter((v): v is number => typeof v === "number");
+  return (
+    <span className="ahead-cell">
+      <span className={p.aheadS < 10 ? "warn-text" : ""}>{clock(p.aheadS)}</span>
+      {values.length > 1 && <Spark values={values} height={18} />}
+    </span>
+  );
+}
+
+/** Each viewer's distance from the room and what their player has downloaded ahead, over the last ten minutes. */
+function SyncCharts({ room }: { room: Room }) {
+  const lines = room.clients.map((c, i) => ({ id: c.userId, name: c.username ?? c.userId, color: lineColor(i), host: c.role === "host",
+    health: c.player?.health ?? [] })).filter((l) => l.health.length > 1);
+  if (lines.length === 0) return null;
+  const drifting = lines.filter((l) => !l.host && l.health.some((h) => typeof h[1] === "number"));
+  return (
+    <div className="session-block">
+      <div className="panel-head">
+        <h4>Sync and buffer, last 10 minutes</h4>
+        <ul className="legend">{lines.map((l) => <li key={l.id}><span className="swatch" style={{ background: l.color }} />{l.name}</li>)}</ul>
+      </div>
+      <div className="sync-charts">
+        {drifting.length > 0 && (
+          <LiveLines title="Distance from the room" lines={drifting.map((l) => ({ ...l, points: l.health.map((h) => [h[0], h[1]] as [number, number | null]) }))}
+            fmt={(v) => (Math.abs(v) < 0.05 ? "0 s" : `${v > 0 ? "+" : "−"}${Math.abs(v).toFixed(1)} s`)} band={OUT_OF_SYNC_S} symmetric />
+        )}
+        <LiveLines title="Downloaded ahead" lines={lines.map((l) => ({ ...l, points: l.health.map((h) => [h[0], h[2]] as [number, number | null]) }))}
+          fmt={(v) => clock(v)} />
+      </div>
+    </div>
+  );
+}
+
+/** A few lines over the last minutes, with a hover readout: Now Playing's sync and buffer charts. */
+function LiveLines({ title, lines, fmt, band, symmetric = false }: {
+  title: string;
+  lines: Array<{ id: string; name: string; color: string; points: Array<[number, number | null]> }>;
+  fmt: (v: number) => string;
+  /** Shaded either side of 0: in sync. */
+  band?: number;
+  symmetric?: boolean;
+}) {
+  const [hover, setHover] = useState<number | null>(null);
+  const W = 1000;
+  const H = 110;
+  const ts = lines.flatMap((l) => l.points.map((p) => p[0]));
+  const vs = lines.flatMap((l) => l.points.map((p) => p[1]).filter((v): v is number => v !== null));
+  const t0 = Math.min(...ts);
+  const t1 = Math.max(t0 + 1000, ...ts);
+  const top = Math.max(band ?? 1, ...vs.map((v) => (symmetric ? Math.abs(v) : v))) * 1.15;
+  const lo = symmetric ? -top : 0;
+  const x = (t: number) => ((t - t0) / (t1 - t0)) * W;
+  const y = (v: number) => H - ((v - lo) / (top - lo)) * H;
+  const path = (pts: Array<[number, number | null]>) => {
+    let d = "";
+    let gap = true;
+    for (const [t, v] of pts) {
+      if (v === null) { gap = true; continue; }
+      d += `${gap ? "M" : "L"}${x(t).toFixed(1)},${y(v).toFixed(1)}`;
+      gap = false;
+    }
+    return d;
+  };
+  const at = hover === null ? null : t0 + (t1 - t0) * hover;
+  const nearest = (pts: Array<[number, number | null]>, t: number) =>
+    pts.reduce<[number, number | null] | null>((b, p) => (!b || Math.abs(p[0] - t) < Math.abs(b[0] - t) ? p : b), null);
+  return (
+    <div className="live-lines">
+      <div className="live-lines-head"><span>{title}</span><span className="muted small">{fmt(top)}{symmetric ? ` / ${fmt(-top)}` : ""}</span></div>
+      <div className="live-plot" onPointerMove={(e) => {
+        const r = e.currentTarget.getBoundingClientRect();
+        setHover(Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)));
+      }} onPointerLeave={() => setHover(null)}>
+        <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" role="img" aria-label={`${title}, last 10 minutes`}>
+          {band !== undefined && <rect x={0} width={W} y={y(band)} height={Math.max(0, y(symmetric ? -band : 0) - y(band))} className="live-band" />}
+          <line x1={0} x2={W} y1={y(0)} y2={y(0)} className="live-zero" />
+          {lines.map((l) => <path key={l.id} d={path(l.points)} style={{ stroke: l.color }} className="live-line" />)}
+          {hover !== null && <line x1={hover * W} x2={hover * W} y1={0} y2={H} className="flow-cross" />}
+        </svg>
+        {at !== null && (
+          <div className={`chart-tip live-tip${hover! > 0.6 ? " left" : ""}`} style={{ left: `${hover! * 100}%` }}>
+            <div className="tip-title">{timeOfDay(at)}</div>
+            {lines.map((l) => {
+              const p = nearest(l.points, at);
+              return p && p[1] !== null ? (
+                <div key={l.id} className="tip-row"><span className="tip-key" style={{ background: l.color }} /><strong>{fmt(p[1])}</strong><span className="muted">{l.name}</span></div>
+              ) : null;
+            })}
+          </div>
+        )}
+      </div>
+      <div className="flow-axis"><span>{timeOfDay(t0)}</span><span>Now</span></div>
+    </div>
+  );
+}
+
+/** The session so far, as History draws it, fetched again every 15 seconds. */
+function LiveOverview({ room, tracks, durationS }: { room: Room; tracks: Record<string, string> | null; durationS: number | null }) {
+  const [data, setData] = useState<PlayDetail | null>(null);
+  const playId = room.playId ?? null;
+  useEffect(() => {
+    if (!playId) return;
+    let gone = false;
+    const load = () => api.play(playId).then((d) => { if (!gone) setData(d); }).catch(() => {});
+    void load();
+    const t = setInterval(load, 15_000);
+    return () => { gone = true; clearInterval(t); };
+  }, [playId]);
+  if (!playId || !data || data.play.id !== playId) return null;
+  return (
+    <div className="session-block">
+      <div className="panel-head">
+        <h4>Session so far</h4>
+        <a className="small" href={`#history/${playId}`}>Full timeline →</a>
+      </div>
+      <SessionChart data={data} durationS={durationS} ctx={{ tracks, streams: data.streams }} compact />
+    </div>
+  );
 }
 
 const ROLE: Record<string, string> = { host: "Host", "co-host": "Co-host", viewer: "Viewer" };
@@ -114,12 +258,14 @@ function Viewers({ room, tracks }: { room: Room; tracks: Record<string, string> 
   const [open, setOpen] = useState<string | null>(null);
   const streamOf = new Map(room.streams.map((s, i) => [s.variantKey, { n: i + 1, s }]));
   const recorded = room.clients.some((c) => c.data);
+  const sampled = room.clients.some((c) => typeof c.player?.aheadS === "number");
   return (
     <div className="table-wrap">
       <table className="table viewers">
         <thead>
           <tr>
             <th>Viewer</th><th>Status</th><th>Stream</th>
+            {sampled && <><th>Sync</th><th>Downloaded ahead</th></>}
             {recorded && <><th>Watched</th><th>Data received</th><th className="num">Sent to viewers</th><th>Buffering</th></>}
             <th aria-label="Details" />
           </tr>
@@ -144,6 +290,7 @@ function Viewers({ room, tracks }: { room: Room; tracks: Record<string, string> 
                   </td>
                   <td><span className={`health ${st.tone}`}><span className={`dot ${st.tone}`} />{st.text}</span></td>
                   <td>{on ? <span className="nowrap">Stream {on.n} <DecisionBadge s={{ ...on.s, started: !!on.s.hlsSessionId }} /></span> : "—"}</td>
+                  {sampled && <><td className="nowrap"><SyncCell c={c} /></td><td><AheadCell c={c} /></td></>}
                   {recorded && (c.data
                     ? <><td className="nowrap">{clock(c.data.watchedS)}</td><td><DataCell d={c.data} /></td>
                       <td className="num">{c.data.upBytes > 0 ? bytes(c.data.upBytes) : "—"}</td><td><BufferingCell d={c.data} /></td></>
@@ -152,7 +299,7 @@ function Viewers({ room, tracks }: { room: Room; tracks: Record<string, string> 
                 </tr>
                 {shown && (
                   <tr className="detail-row">
-                    <td colSpan={recorded ? 8 : 4}>
+                    <td colSpan={(recorded ? 8 : 4) + (sampled ? 2 : 0)}>
                       <dl className="grid">
                         <dt>Discord user ID</dt><dd className="mono">{c.userId}</dd>
                         <dt>Joined</dt><dd>{dateTime(c.joinedAt)} ({ago((Date.now() - c.joinedAt) / 1000)} ago)</dd>
@@ -293,6 +440,10 @@ function Session({ room, durationS, sub, tracks }: { room: Room; durationS: numb
         <h4>Viewers ({room.clients.length})</h4>
         <Viewers room={room} tracks={tracks} />
       </div>
+
+      <SyncCharts room={room} />
+
+      <LiveOverview room={room} tracks={tracks} durationS={durationS} />
 
       {(room.away.length > 0 || room.queue.length > 0 || room.held) && (
         <div className="session-block">

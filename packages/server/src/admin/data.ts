@@ -4,7 +4,7 @@ import readline from "node:readline";
 import { adminRooms, getQbtManagerStreams, type AdminRoom } from "../services/sync.js";
 import { instanceHosts } from "../routes/discord.js";
 import { streamNotesOf } from "../services/stream-notes.js";
-import { isFfmpegSession, ffmpegSessionKnown } from "../services/ffmpeg/engine.js";
+import { isFfmpegSession, ffmpegSessionKnown, ffmpegProgress, type FfmpegProgress } from "../services/ffmpeg/engine.js";
 import { LOG_DIR } from "../services/logger.js";
 
 const here = import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname);
@@ -38,6 +38,8 @@ export interface StreamView {
   /** Everything the playlist told its players (services/stream-notes.ts). */
   notes: Record<string, string | number>;
   notesAt: number | null;
+  /** A stream made here: how fast, how far ahead, on what; null for Plex's, which doesn't say. */
+  progress: FfmpegProgress | null;
 }
 
 /** A viewer's play so far, as the recorder (admin/recorder.ts) has counted it. */
@@ -63,7 +65,14 @@ export interface ViewerData {
 }
 
 /** What a viewer's player is doing, from its log lines (admin/recorder.ts). */
-export interface PlayerNowView { stall: "buffering" | "start" | "seek" | null; sinceMs: number | null }
+export interface PlayerNowView {
+  stall: "buffering" | "start" | "seek" | null;
+  sinceMs: number | null;
+  /** Its last Health sample: how far from the room (null for the host) and how much downloaded ahead, seconds; and those lately. */
+  driftS?: number | null;
+  aheadS?: number | null;
+  health?: Array<[number, number | null, number | null]>;
+}
 
 export type ClientView = AdminRoom["clients"][number] & { data?: ViewerData; player?: PlayerNowView | null };
 
@@ -152,6 +161,7 @@ export function overview(now = Date.now()): Overview {
         plexClientId: fact?.plex_client_id ?? null,
         notes,
         notesAt: kept?.at ?? null,
+        progress: v.hlsSessionId && engine === "ffmpeg" ? ffmpegProgress(v.hlsSessionId, now) : null,
       };
     });
     return {
@@ -308,7 +318,8 @@ function scrub(line: string): string {
     .replace(/(Bearer\s+)[A-Za-z0-9._~+/-]+=*/g, "$1<redacted>");
 }
 
-export interface LogQuery { q?: string; level?: "warn" | "error"; tag?: string; limit?: number }
+/** `from` and `to`: only lines written in that time, ms (a session's, from its History page). */
+export interface LogQuery { q?: string; level?: "warn" | "error"; tag?: string; limit?: number; from?: number; to?: number }
 
 /** The last `limit` lines of a log file that match, oldest first. */
 export async function readLog(name: string, query: LogQuery = {}, dir = LOG_DIR): Promise<{ lines: LogLine[]; scanned: number; matched: number } | null> {
@@ -321,10 +332,17 @@ export async function readLog(name: string, query: LogQuery = {}, dir = LOG_DIR)
   const kept: LogLine[] = [];
   let scanned = 0;
   let matched = 0;
+  // A line without a time of its own goes with the one before it.
+  let inTime = true;
   const lines = readline.createInterface({ input: fs.createReadStream(file, { encoding: "utf8" }), crlfDelay: Infinity });
   for await (const raw of lines) {
     scanned++;
     const line = parseLogLine(scrub(raw), scanned);
+    if (query.from !== undefined || query.to !== undefined) {
+      const t = line.at ? Date.parse(line.at) : NaN;
+      if (Number.isFinite(t)) inTime = (query.from === undefined || t >= query.from) && (query.to === undefined || t <= query.to);
+      if (!inTime) continue;
+    }
     if (query.level === "error" && line.level !== "error") continue;
     if (query.level === "warn" && line.level === "info") continue;
     if (tag && line.tag?.toLowerCase() !== tag) continue;

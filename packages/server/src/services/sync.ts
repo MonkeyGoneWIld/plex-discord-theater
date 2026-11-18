@@ -1474,6 +1474,12 @@ function sendHostRequests(room: Room): void {
     dropRequest(hr);
     clearTimeout(room.hostRequestTimer);
     logEvent("Sync", "a request for the host role ended: who asked left, or the role moved", { requester: a.requesterName ?? a.requesterId });
+    const roomId = [...rooms].find(([, r]) => r === room)?.[0];
+    if (roomId) {
+      adminHooks.hostRequest({ at: Date.now(), roomId, outcome: "ended", userId: a.requesterId, username: a.requesterName ?? null,
+        hostId: a.hostId, hostName: [...room.clients].find((c) => c.userId === a.hostId)?.username ?? null,
+        why: [...room.clients].some((c) => c.userId === a.requesterId) ? "host changed" : "asker left" });
+    }
   }
   const now = Date.now();
   for (const c of room.clients) {
@@ -2858,6 +2864,8 @@ export function attachWebSocketServer(server: Server): void {
           room: roomId.substring(0, 8), by: client.username ?? client.userId, host: host.username ?? host.userId,
           away: !!host.activityAway, waitS: Math.round((a.endsAt - now) / 1000),
         });
+        adminHooks.hostRequest({ at: now, roomId, outcome: "asked", userId: client.userId, username: client.username ?? null,
+          hostId: host.userId, hostName: host.username ?? null, away: !!host.activityAway, waitS: Math.round((a.endsAt - now) / 1000) });
         timeHostRequest(room, roomId);
         sendHostRequests(room);
         return;
@@ -2882,6 +2890,8 @@ export function attachWebSocketServer(server: Server): void {
         logEvent("Sync", "the host declined a request for the role", {
           room: roomId.substring(0, 8), by: a.requesterName ?? a.requesterId,
         });
+        adminHooks.hostRequest({ at: now, roomId, outcome: "declined", userId: a.requesterId, username: a.requesterName ?? null,
+          hostId: client.userId, hostName: client.username ?? null });
         sendHostRequests(room);
         return;
       }

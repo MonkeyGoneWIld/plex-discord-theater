@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import type { PlayDetail, PlayEvent, TrackPoint } from "./types";
 import { clock, quality, timeOfDay } from "./format";
 import { decisionOf } from "./parts";
@@ -8,6 +8,7 @@ import {
 import { Icon } from "./icons";
 import { Avatar } from "./viz";
 import { rolesOf } from "./clients";
+import { awayOf, deliveryParts, streamAt, type DeliveryPart } from "./session";
 
 /**
  * A session at a glance, for the questions a list of events answers slowly:
@@ -102,7 +103,7 @@ const labelAt = (left: number, top: number, above: boolean) => {
  * it plays and runs flat, dashed, while paused; each seek a step, named by
  * what made it.
  */
-function PositionLane({ track, start, end, durationS, marks, jumps, finished }: {
+function PositionLane({ track, start, end, durationS, marks, jumps, finished, viewers, hoverAt, toggle }: {
   track: TrackPoint[];
   start: number;
   end: number;
@@ -110,8 +111,12 @@ function PositionLane({ track, start, end, durationS, marks, jumps, finished }: 
   marks: Array<{ at: number; posS: number; tone: string; title: string }>;
   jumps: Array<{ at: number; posS: number; label: string; title: string; forward: boolean }>;
   finished: { at: number; posS: number } | null;
+  /** Each viewer's own player's position, drawn with the room's when asked for. */
+  viewers: Array<{ userId: string; name: string; track: TrackPoint[]; color: string }>;
+  /** The time the chart's hover line is at. */
+  hoverAt: number | null;
+  toggle: React.ReactNode;
 }) {
-  const [hover, setHover] = useState<number | null>(null);
   const [trackRef, trackWidth] = useWidth<HTMLDivElement>();
   const W = 1000;
   const H = 120;
@@ -147,19 +152,25 @@ function PositionLane({ track, start, end, durationS, marks, jumps, finished }: 
   // The title finishing is labelled too, so it takes its turn among the seeks.
   const shown = spaced([...jumps.map((j) => left(j.at)), finished ? left(finished.at) : -Infinity], labelGap(trackWidth));
   const ticks = positionTicks(durationS);
-  const at = hover === null ? null : start + (end - start) * hover;
-  const posAt = at === null ? null : positionAt(track, at);
+  // A viewer's line: their samples joined, broken where they were gone a while.
+  const lineOf = (pts: TrackPoint[]) => {
+    let d = "";
+    let prevAt: number | null = null;
+    for (const p of pts) {
+      if (p[1] < 0) { prevAt = null; continue; }
+      d += `${prevAt !== null && p[0] - prevAt <= 30_000 ? "L" : "M"}${pt(p[0], p[1])}`;
+      prevAt = p[0];
+    }
+    return d;
+  };
+  const hoverLeft = hoverAt === null ? null : left(hoverAt);
   return (
     <div className="lane lane-position">
-      <div className="lane-label">Position</div>
-      <div className="lane-track position-track" ref={trackRef}
-        onMouseMove={(e) => {
-          const r = e.currentTarget.getBoundingClientRect();
-          setHover(Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)));
-        }}
-        onMouseLeave={() => setHover(null)}>
+      <div className="lane-label">Position{toggle}</div>
+      <div className={`lane-track position-track${viewers.length ? " with-viewers" : ""}`} ref={trackRef}>
         <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" aria-hidden="true">
           {ticks.map((t) => <line key={t} className="position-grid" x1={0} x2={W} y1={y(t)} y2={y(t)} />)}
+          {viewers.map((v) => <path key={v.userId} className="position-viewer" d={lineOf(v.track)} style={{ stroke: v.color }} />)}
           <path className="position-line paused" d={paused} />
           <path className="position-line" d={played} />
           <path className="position-seek" d={seeks} />
@@ -178,34 +189,49 @@ function PositionLane({ track, start, end, durationS, marks, jumps, finished }: 
           <span key={i} className={`position-mark ${m.tone}`} title={m.title}
             style={{ left: `${(x(m.at) / W) * 100}%`, top: `${(y(m.posS) / H) * 100}%` }} />
         ))}
-        {hover !== null && at !== null && (
-          <span className={`position-tip${hover > 0.7 ? " left" : ""}`} style={{ left: `${hover * 100}%` }}>
-            {timeOfDay(at)}{posAt !== null ? <> · at <strong>{clock(posAt)}</strong></> : " · nothing playing"}
-          </span>
-        )}
+        {hoverAt !== null && hoverLeft !== null && (() => {
+          const p = positionAt(track, hoverAt);
+          return p === null ? null : <span className="position-dot" style={{ left: `${hoverLeft}%`, top: `${top(p)}%` }} />;
+        })()}
       </div>
     </div>
   );
 }
 
-export function SessionChart({ data, durationS, ctx }: { data: PlayDetail; durationS: number | null; ctx: EventContext }) {
+/** Up to three viewers' own position lines get a colour each; the rest share one. */
+const VIEWER_LINES = ["var(--series-1)", "var(--series-2)", "var(--series-3)"];
+const OTHER_LINE = "var(--muted)";
+
+interface Row {
+  key: string;
+  /** What the hover readout calls it. */
+  name: string;
+  /** What it was doing at a moment, for the hover readout; null says nothing. */
+  at: (t: number) => string | null;
+}
+
+export function SessionChart({ data, durationS, ctx, compact = false }: { data: PlayDetail; durationS: number | null; ctx: EventContext; compact?: boolean }) {
   const { viewers, streams, events } = data;
   const [start, end] = span(data);
   const when = (a: number, b: number) => `${timeOfDay(a)} – ${timeOfDay(b)} (${clock((b - a) / 1000)})`;
   const track = data.track ?? [];
   const length = Math.max(durationS ?? 0, ...track.map((p) => p[1]), ...events.map((e) => e.posS ?? 0), 1);
+  const [hover, setHover] = useState<{ f: number; x: number } | null>(null);
+  const [eachViewer, setEachViewer] = useState(false);
+  const at = hover === null ? null : start + (end - start) * hover.f;
+  const covering = (segs: Seg[], t: number) => segs.filter((s) => s.from <= t && t <= s.to);
 
   // Playback: playing, paused or held, from its play, pause and resume events.
   const playback: Seg[] = [];
   const marks: Array<{ at: number; tone: string; title: string }> = [];
   let state: "playing" | "paused" | null = null;
   let since = start;
-  const close = (at: number) => {
-    if (state && at > since) {
-      playback.push({ from: since, to: at, tone: state === "playing" ? "good" : "muted", title: `${state === "playing" ? "Playing" : "Paused"} · ${when(since, at)}`,
+  const close = (t: number) => {
+    if (state && t > since) {
+      playback.push({ from: since, to: t, tone: state === "playing" ? "good" : "muted", title: `${state === "playing" ? "Playing" : "Paused"} · ${when(since, t)}`,
         label: state === "playing" ? "Playing" : "Paused" });
     }
-    since = at;
+    since = t;
   };
   for (const e of events) {
     if (e.kind === "play" || e.kind === "resume") { close(e.at); state = "playing"; }
@@ -216,7 +242,7 @@ export function SessionChart({ data, durationS, ctx }: { data: PlayDetail; durat
   close(end);
   const held: Seg[] = events.filter((e) => e.kind === "room waited").map((e) => {
     const ms = Number(e.detail?.ms) || 0;
-    return { from: e.at - ms, to: e.at, tone: "warn", title: `${eventText(e, ctx)} · ${when(e.at - ms, e.at)}` };
+    return { from: e.at - ms, to: e.at, tone: "warn", title: `${eventText(e, ctx)} · ${when(e.at - ms, e.at)}`, label: "Waiting" };
   });
   // Where in the title things went wrong, on the position line.
   const problems = events.filter((e) => (e.kind === "buffering" || e.kind === "player error") && e.posS !== null)
@@ -225,66 +251,157 @@ export function SessionChart({ data, durationS, ctx }: { data: PlayDetail; durat
   const jumps = jumpsOf(events).map((j) => ({ at: j.at, posS: j.toS, label: j.label, title: markTitle(j.event, ctx), forward: j.toS > j.fromS }));
   const done = finishedAt(events);
   const finished = done ? { at: done.at, posS: done.posS ?? positionAt(track, done.at) ?? length } : null;
+  // Each viewer's own player, where it was in the title (from its samples every 10 s).
+  const own = viewers.map((v, i) => ({ userId: v.userId, name: v.username ?? v.userId, track: data.positions?.[v.userId] ?? [],
+    color: VIEWER_LINES[i] ?? OTHER_LINE })).filter((v) => v.track.length > 1);
+
+  const rows: Row[] = [];
+  rows.push({ key: "playback", name: "Playback", at: (t) => covering([...held, ...playback], t)[0]?.label ?? "Stopped" });
+  if (track.some((p) => p[1] >= 0)) {
+    rows.push({ key: "position", name: "Position", at: (t) => { const p = positionAt(track, t); return p === null ? null : clock(p); } });
+  }
+  const streamLanes = streams.map((s, i) => {
+    const d = decisionOf(s);
+    const to = s.endedAt ?? end;
+    const p = s.variantKey ? s.variantKey.split(":") : [];
+    rows.push({ key: `s${s.id}`, name: `Stream ${i + 1}`, at: (t) => (s.startedAt <= t && t <= to ? d.label : null) });
+    return (
+      <Lane key={s.id} start={start} end={end}
+        label={<>Stream {i + 1}</>} sub={d.label}
+        segs={[{ from: s.startedAt, to, tone: d.tone === "warn" ? "warn" : d.tone === "good" ? "good" : "muted",
+          title: `Stream ${i + 1} · ${d.label}${s.reason ? ` · ${s.reason}` : ""} · audio ${trackName(ctx, s.audioStreamId ?? p[0], "default")}`
+            + `, subtitles ${trackName(ctx, s.subtitleStreamId)} · ${when(s.startedAt, to)}`, label: d.label }]}
+        marks={events.filter((e) => e.kind === "stream restarted" && e.detail?.variant === s.variantKey)
+          .map((e) => ({ at: e.at, tone: "info", title: markTitle(e, ctx) }))} />
+    );
+  });
+  const viewerLanes = viewers.map((v) => {
+    const who = v.username ?? v.userId;
+    const mine = events.filter((e) => e.userId === v.userId);
+    const stalls: Seg[] = mine.filter((e) => e.kind === "buffering" || e.kind === "loaded after seek" || e.kind === "loaded at start").map((e) => {
+      const ms = Number(e.detail?.ms) || 0;
+      const what = e.kind === "buffering" ? "Buffering" : e.kind === "loaded at start" ? "Loading at start" : "Loading after seek";
+      return { from: e.at - ms, to: e.at, tone: e.kind === "buffering" ? "bad" : "info", label: what,
+        title: `${what}${e.posS !== null ? ` at ${clock(e.posS)}` : ""} · ${when(e.at - ms, e.at)}` };
+    });
+    // While they were host or co-host: from what they came in as (some before the session opened), and each change.
+    const roleSpans = rolesOf([...(data.lead ?? []), ...events], v.userId, v.firstSeen, v.lastSeen);
+    const roles: Seg[] = roleSpans.filter((r) => r.role !== "viewer")
+      .map((r) => ({ from: r.from, to: r.to, tone: r.role === "host" ? "role-host" : "role-cohost",
+        title: `${who} · ${r.role === "host" ? "host" : "co-host"} ${when(r.from, r.to)}` }));
+    // While they had switched away from the Discord window.
+    const away: Seg[] = awayOf(events, v.userId, v.lastSeen).map((s) => ({ ...s, tone: "away", label: "Away",
+      title: `${who} · away from the Discord window ${when(s.from, s.to)}` }));
+    const mineTrack = data.positions?.[v.userId] ?? [];
+    rows.push({ key: v.userId, name: who, at: (t) => {
+      if (t < v.firstSeen || t > v.lastSeen) return "Not in the room";
+      const role = roleSpans.find((r) => r.from <= t && t <= r.to)?.role;
+      const parts = [role === "host" ? "Host" : role === "co-host" ? "Co-host" : "Viewer"];
+      const s = streamAt(events, streams, v.userId, t);
+      if (s) parts.push(`Stream ${streams.indexOf(s) + 1}`);
+      const stall = covering(stalls, t)[0];
+      if (stall) parts.push(stall.label!.toLowerCase());
+      if (covering(away, t).length) parts.push("away from Discord");
+      const p = mineTrack.length > 1 ? positionAt(mineTrack, t) : null;
+      const room = positionAt(track, t);
+      if (p !== null) parts.push(`at ${clock(p)}${room !== null && role !== "host" ? ` (${drift(p - room)})` : ""}`);
+      return parts.join(" · ");
+    } });
+    return (
+      <Lane key={v.userId} start={start} end={end}
+        label={<span className="lane-person"><Avatar id={v.userId} name={v.username} size={20} />{who}</span>}
+        segs={[{ from: v.firstSeen, to: v.lastSeen, tone: "present", title: `${who} · in the room ${when(v.firstSeen, v.lastSeen)}` }, ...away, ...roles, ...stalls]}
+        marks={mine.filter((e) => VIEWER_MARKS.includes(e.kind) && !(e.kind === "stream changed" && !e.detail?.from))
+          .map((e) => ({ at: e.at, tone: e.kind === "player error" ? "error" : "accent", title: markTitle(e, ctx) }))} />
+    );
+  });
+
+  // The hover line: across every row, with what each was doing then.
+  const onMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const lane = e.currentTarget.querySelector(".lane-track");
+    if (!lane) return;
+    const r = lane.getBoundingClientRect();
+    const box = e.currentTarget.getBoundingClientRect();
+    if (e.clientX < r.left || e.clientX > r.right) { setHover(null); return; }
+    setHover({ f: (e.clientX - r.left) / r.width, x: e.clientX - box.left });
+  };
 
   return (
-    <div className="session-chart" role="img" aria-label="Session timeline: playback, position in the title, streams and viewers over time">
+    <div className={`session-chart${compact ? " compact" : ""}`} role="img"
+      aria-label="Session timeline: playback, position in the title, streams and viewers over time"
+      onPointerMove={onMove} onPointerDown={onMove} onPointerLeave={() => setHover(null)}>
       <Lane label="Playback" segs={[...playback, ...held]} marks={marks} start={start} end={end} />
       {track.some((p) => p[1] >= 0) && <PositionLane track={track} start={start} end={end} durationS={length} marks={problems}
-        jumps={jumps} finished={finished} />}
-      {streams.map((s, i) => {
-        const d = decisionOf(s);
-        const to = s.endedAt ?? end;
-        const p = s.variantKey ? s.variantKey.split(":") : [];
-        return (
-          <Lane key={s.id} start={start} end={end}
-            label={<>Stream {i + 1}</>} sub={d.label}
-            segs={[{ from: s.startedAt, to, tone: d.tone === "warn" ? "warn" : d.tone === "good" ? "good" : "muted",
-              title: `Stream ${i + 1} · ${d.label}${s.reason ? ` · ${s.reason}` : ""} · audio ${trackName(ctx, s.audioStreamId ?? p[0], "default")}`
-                + `, subtitles ${trackName(ctx, s.subtitleStreamId)} · ${when(s.startedAt, to)}`, label: d.label }]}
-            marks={events.filter((e) => e.kind === "stream restarted" && e.detail?.variant === s.variantKey)
-              .map((e) => ({ at: e.at, tone: "info", title: markTitle(e, ctx) }))} />
-        );
-      })}
-      {viewers.map((v) => {
-        const mine = events.filter((e) => e.userId === v.userId);
-        const stalls: Seg[] = mine.filter((e) => e.kind === "buffering" || e.kind === "loaded after seek" || e.kind === "loaded at start").map((e) => {
-          const ms = Number(e.detail?.ms) || 0;
-          return { from: e.at - ms, to: e.at, tone: e.kind === "buffering" ? "bad" : "info",
-            title: `${e.kind === "buffering" ? "Buffering" : e.kind === "loaded at start" ? "Loading at start" : "Loading after seek"}`
-              + `${e.posS !== null ? ` at ${clock(e.posS)}` : ""} · ${when(e.at - ms, e.at)}` };
-        });
-        // While they were host or co-host: from what they came in as (some before the session opened), and each change.
-        const roles: Seg[] = rolesOf([...(data.lead ?? []), ...events], v.userId, v.firstSeen, v.lastSeen)
-          .filter((r) => r.role !== "viewer")
-          .map((r) => ({ from: r.from, to: r.to, tone: r.role === "host" ? "role-host" : "role-cohost",
-            title: `${v.username ?? v.userId} · ${r.role === "host" ? "host" : "co-host"} ${when(r.from, r.to)}` }));
-        return (
-          <Lane key={v.userId} start={start} end={end}
-            label={<span className="lane-person"><Avatar id={v.userId} name={v.username} size={20} />{v.username ?? v.userId}</span>}
-            segs={[{ from: v.firstSeen, to: v.lastSeen, tone: "present", title: `${v.username ?? v.userId} · in the room ${when(v.firstSeen, v.lastSeen)}` }, ...roles, ...stalls]}
-            marks={mine.filter((e) => ["stream changed", "quality", "subtitles", "player error", "role"].includes(e.kind) && !(e.kind === "stream changed" && !e.detail?.from))
-              .map((e) => ({ at: e.at, tone: e.kind === "player error" ? "error" : "accent", title: markTitle(e, ctx) }))} />
-        );
-      })}
-      <div className="lane lane-axis">
-        <div className="lane-label" />
-        <div className="lane-track">
-          {[0, 0.25, 0.5, 0.75, 1].map((f) => (
-            <span key={f} style={{ left: `${f * 100}%` }} className={f === 1 ? "end" : f === 0 ? "start" : ""}>{timeOfDay(start + (end - start) * f)}</span>
-          ))}
-        </div>
+        jumps={jumps} finished={finished} viewers={eachViewer ? own : []} hoverAt={at}
+        toggle={own.length > 0 && !compact ? (
+          <button type="button" className={`chip-toggle${eachViewer ? " on" : ""}`} aria-pressed={eachViewer}
+            onClick={() => setEachViewer((x) => !x)}>Each viewer</button>
+        ) : null} />}
+      {streamLanes}
+      {viewerLanes}
+      <AxisLane start={start} end={end} />
+      {hover !== null && at !== null && (
+        <>
+          <span className="chart-hover-line" style={{ left: hover.x }} />
+          <div className={`chart-hover-tip${hover.f > 0.55 ? " left" : ""}`} style={{ left: hover.x }}>
+            <strong>{timeOfDay(at)}</strong>
+            <dl>
+              {rows.map((r) => {
+                const said = r.at(at);
+                return said === null ? null : <Fragment key={r.key}><dt>{r.name}</dt><dd>{said}</dd></Fragment>;
+              })}
+            </dl>
+          </div>
+        </>
+      )}
+      {eachViewer && own.length > 0 && (
+        <ul className="legend chart-key">
+          <li><span className="swatch line" style={{ background: "var(--text)" }} />Room</li>
+          {own.map((v) => <li key={v.userId}><span className="swatch line" style={{ background: v.color }} />{v.name}</li>)}
+        </ul>
+      )}
+      {!compact && (
+        <ul className="legend chart-key">
+          <li><span className="swatch" style={{ background: "var(--good)" }} />Playing / direct</li>
+          <li><span className="swatch" style={{ background: "var(--warn)" }} />Transcode / waiting for the host</li>
+          <li><span className="swatch" style={{ background: "var(--bad)" }} />Buffering</li>
+          <li><span className="swatch error-key" />Player error</li>
+          <li><span className="swatch" style={{ background: "var(--info)" }} />Loading (start or after seek)</li>
+          <li><span className="swatch" style={{ background: "var(--muted)" }} />Paused</li>
+          <li><span className="swatch away-key" />Away from Discord</li>
+          <li><span className="swatch stripe" style={{ background: "var(--host)" }} />Host</li>
+          <li><span className="swatch stripe" style={{ background: "var(--cohost)" }} />Co-host</li>
+          <li><span className="swatch mark" />Event</li>
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/** What a viewer's lane marks: their own changes, and requests for the host role. */
+const VIEWER_MARKS = ["stream changed", "quality", "subtitles", "player error", "role", "asked for host", "request declined", "request ended"];
+
+/** "+1.2 s ahead", "0.8 s behind", "in sync". */
+export function drift(s: number): string {
+  if (Math.abs(s) < 0.5) return "in sync";
+  return `${Math.abs(s).toFixed(1)} s ${s > 0 ? "ahead" : "behind"}`;
+}
+
+/** The session's clock along the foot of the chart: as many times as fit without running into each other. */
+function AxisLane({ start, end, fmt = timeOfDay }: { start: number; end: number; fmt?: (t: number) => string }) {
+  const [ref, width] = useWidth<HTMLDivElement>();
+  // A time is about 64 px wide: five on a desktop, three on a phone.
+  const all = width > 0 && width < 340 ? [0, 0.5, 1] : [0, 0.25, 0.5, 0.75, 1];
+  // A span too short for its times to differ says each once.
+  const steps = all.filter((f, i) => i === 0 || fmt(start + (end - start) * f) !== fmt(start + (end - start) * all[i - 1]));
+  return (
+    <div className="lane lane-axis">
+      <div className="lane-label" />
+      <div className="lane-track" ref={ref}>
+        {steps.map((f) => (
+          <span key={f} style={{ left: `${f * 100}%` }} className={f === 1 ? "end" : f === 0 ? "start" : ""}>{fmt(start + (end - start) * f)}</span>
+        ))}
       </div>
-      <ul className="legend chart-key">
-        <li><span className="swatch" style={{ background: "var(--good)" }} />Playing / direct</li>
-        <li><span className="swatch" style={{ background: "var(--warn)" }} />Transcode / waiting for the host</li>
-        <li><span className="swatch" style={{ background: "var(--bad)" }} />Buffering</li>
-        <li><span className="swatch error-key" />Player error</li>
-        <li><span className="swatch" style={{ background: "var(--info)" }} />Loading (start or after seek)</li>
-        <li><span className="swatch" style={{ background: "var(--muted)" }} />Paused</li>
-        <li><span className="swatch" style={{ background: "var(--brand)" }} />Host</li>
-        <li><span className="swatch" style={{ background: "var(--cohost)" }} />Co-host</li>
-        <li><span className="swatch mark" />Event</li>
-      </ul>
     </div>
   );
 }
@@ -296,13 +413,27 @@ export function Watched({ data, durationS }: { data: PlayDetail; durationS: numb
   const length = Math.max(durationS ?? 0, ...Object.values(watched).flat().map((p) => p[1]), ...data.events.map((e) => e.posS ?? 0), 1);
   const pos = (s: number) => Math.min(100, Math.max(0, (s / length) * 100));
   const all = unionParts(Object.values(watched));
-  const row = (key: string, label: React.ReactNode, parts: Array<[number, number]>, events: PlayEvent[]) => {
+  // Each viewer's coverage by how it reached them, where their own player's positions say: direct or transcoded.
+  const delivery = (userId: string): DeliveryPart[] | null => {
+    const mine = data.positions?.[userId];
+    if (!mine || mine.length < 2) return null;
+    const parts = deliveryParts(mine, data.events, data.streams, userId);
+    return parts.length ? parts : null;
+  };
+  // Which ways the coverage was coloured: the key names only those.
+  const ways = new Set(data.viewers.flatMap((v) => delivery(v.userId)?.map((p) => p.decision) ?? [undefined]));
+  const anyDelivery = [...ways].some((w) => w !== undefined);
+  const row = (key: string, label: React.ReactNode, parts: Array<[number, number]>, events: PlayEvent[], how: DeliveryPart[] | null = null) => {
     const seen = parts.reduce((s, [a, b]) => s + (b - a), 0);
     return (
       <div className="lane" key={key}>
         <div className="lane-label">{label}<span className="muted small">{clock(seen)} · {Math.round((seen / length) * 100)}% of it</span></div>
         <div className="lane-track watched-track">
-          {parts.map(([a, b], i) => (
+          {how ? how.map((p, i) => (
+            <span key={i} className={`lane-seg watched ${p.decision === "transcode" ? "transcoded" : p.decision === "copy" ? "direct" : ""}`}
+              title={`Watched ${clock(p.from)} – ${clock(p.to)} · ${p.decision === "transcode" ? "transcoded" : p.decision === "copy" ? "direct" : "stream not recorded"}`}
+              style={{ left: `${pos(p.from)}%`, width: `${Math.max(0.4, pos(p.to) - pos(p.from))}%` }} />
+          )) : parts.map(([a, b], i) => (
             <span key={i} className="lane-seg watched" title={`Watched ${clock(a)} – ${clock(b)}`}
               style={{ left: `${pos(a)}%`, width: `${Math.max(0.4, pos(b) - pos(a))}%` }} />
           ))}
@@ -361,17 +492,14 @@ export function Watched({ data, durationS }: { data: PlayDetail; durationS: numb
       {data.viewers.length > 1 && row("all", "All viewers", all, trouble(null))}
       {data.viewers.map((v) => row(v.userId,
         <span className="lane-person"><Avatar id={v.userId} name={v.username} size={20} />{v.username ?? v.userId}</span>,
-        watched[v.userId] ?? [], trouble(v.userId)))}
-      <div className="lane lane-axis">
-        <div className="lane-label" />
-        <div className="lane-track">
-          {[0, 0.25, 0.5, 0.75, 1].map((f) => (
-            <span key={f} style={{ left: `${f * 100}%` }} className={f === 1 ? "end" : f === 0 ? "start" : ""}>{clock(length * f)}</span>
-          ))}
-        </div>
-      </div>
+        watched[v.userId] ?? [], trouble(v.userId), delivery(v.userId)))}
+      <AxisLane start={0} end={length} fmt={(s) => clock(s)} />
       <ul className="legend chart-key">
-        <li><span className="swatch" style={{ background: "var(--accent)" }} />Watched</li>
+        {(!anyDelivery || ways.has(null) || ways.has(undefined)) && (
+          <li><span className="swatch" style={{ background: "var(--accent)" }} />Watched{anyDelivery ? " (stream not recorded)" : ""}</li>
+        )}
+        {ways.has("copy") && <li><span className="swatch" style={{ background: "var(--good)" }} />Watched direct</li>}
+        {ways.has("transcode") && <li><span className="swatch" style={{ background: "var(--warn)" }} />Watched transcoded</li>}
         {arcs.length > 0 && <li><span className="swatch" style={{ background: "var(--info)" }} />Seek</li>}
         <li><span className="swatch mark" style={{ background: "var(--bad)" }} />Buffering</li>
         <li><span className="swatch error-key" />Player error</li>
@@ -452,6 +580,11 @@ export function keyMoments(data: PlayDetail, ctx: EventContext = {}): Moment[] {
         : { tone: "muted", icon: "check", title: `${who} reached the end of the title` });
     } else if (e.kind === "role") {
       of(e, { tone: "info", icon: "users", title: eventText(e, ctx) });
+    } else if (e.kind === "asked for host" || e.kind === "request declined" || e.kind === "request ended") {
+      of(e, { tone: "muted", icon: "users", title: eventText(e, ctx) });
+    } else if (e.kind === "short sound") {
+      of(e, { tone: "warn", icon: "stream", title: "The title's sound is shorter than its picture",
+        why: eventText(e, ctx) });
     } else if (e.kind === "stream restarted") {
       of(e, { tone: "info", icon: "history", title: eventText(e, ctx) });
     } else if (e.kind === "buffering" && Number(d.ms) >= 3000) {

@@ -1,11 +1,30 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "./api";
 import type { LogFile, LogResult } from "./types";
-import { bytes, timeOfDay, zoneLabel } from "./format";
+import { bytes, dateTime, timeOfDay, zoneLabel } from "./format";
 
-export function Logs({ onError }: { onError: (e: unknown) => void }) {
+/** `#logs/file=theater-2026-11-18.log&from=…&to=…`: a session's lines, from its History page. */
+export function sessionLogsHref(startedAt: number, endedAt: number | null): string[] {
+  const end = endedAt ?? Date.now();
+  const day = (t: number) => `theater-${new Date(t).toISOString().slice(0, 10)}.log`;
+  // Each file is one UTC day: a session over midnight is in two.
+  const files = [...new Set([day(startedAt), day(end)])];
+  return files.map((f) => `#logs/${encodeURIComponent(`file=${f}&from=${startedAt}&to=${end}`)}`);
+}
+
+function windowOf(route: string | null): { file: string; from: number; to: number } | null {
+  if (!route) return null;
+  const p = new URLSearchParams(route);
+  const from = Number(p.get("from"));
+  const to = Number(p.get("to"));
+  const file = p.get("file") ?? "";
+  return file && from > 0 && to >= from ? { file, from, to } : null;
+}
+
+export function Logs({ onError, route = null }: { onError: (e: unknown) => void; route?: string | null }) {
   const [files, setFiles] = useState<LogFile[]>([]);
-  const [file, setFile] = useState("");
+  const [span, setSpan] = useState(() => windowOf(route));
+  const [file, setFile] = useState(span?.file ?? "");
   const [q, setQ] = useState("");
   const [tag, setTag] = useState("");
   const [level, setLevel] = useState("");
@@ -24,15 +43,21 @@ export function Logs({ onError }: { onError: (e: unknown) => void }) {
   const load = useCallback(async () => {
     setBusy(true);
     try {
-      setResult(await api.logs({ file: file || undefined, q, tag, level, limit }));
+      setResult(await api.logs({ file: file || undefined, q, tag, level, limit, from: span?.from, to: span?.to }));
     } catch (e) {
       onError(e);
     } finally {
       setBusy(false);
     }
-  }, [file, q, tag, level, limit, onError]);
+  }, [file, q, tag, level, limit, span, onError]);
 
-  useEffect(() => { void load(); }, [file, level, limit]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    const w = windowOf(route);
+    setSpan(w);
+    if (w) setFile(w.file);
+  }, [route]);
+
+  useEffect(() => { void load(); }, [file, level, limit, span]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!follow) return;
@@ -52,7 +77,7 @@ export function Logs({ onError }: { onError: (e: unknown) => void }) {
       <form className="toolbar" onSubmit={(e) => { e.preventDefault(); void load(); }}>
         <label>
           <span>File</span>
-          <select value={file} onChange={(e) => setFile(e.target.value)}>
+          <select value={file} onChange={(e) => { setFile(e.target.value); setSpan(null); }}>
             {files.map((f) => <option key={f.name} value={f.name}>{f.name} · {bytes(f.bytes)}</option>)}
           </select>
         </label>
@@ -84,6 +109,12 @@ export function Logs({ onError }: { onError: (e: unknown) => void }) {
           <input type="checkbox" checked={follow} onChange={(e) => setFollow(e.target.checked)} /> Follow
         </label>
       </form>
+      {span && (
+        <p className="note log-window">
+          Showing only lines written during the session, {dateTime(span.from)} to {timeOfDay(span.to)}.{" "}
+          <button type="button" className="link" onClick={() => { setSpan(null); history.replaceState(null, "", "#logs"); }}>Show the whole file</button>
+        </p>
+      )}
       {result && (
         <p className="muted small">
           {result.matched.toLocaleString()} of {result.scanned.toLocaleString()} lines match

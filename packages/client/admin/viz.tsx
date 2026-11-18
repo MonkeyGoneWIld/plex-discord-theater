@@ -98,11 +98,14 @@ const W = 600;
  * moment from the server, Discord's cache and each other, stacked, against
  * the bitrate they need to keep playing (the dashed line).
  */
-export function FlowChart({ points, requiredBps, height = 150, stepS = 10 }: {
+export function FlowChart({ points, requiredBps, height = 150, stepS = 10, axis, label }: {
   points: FlowPoint[];
   requiredBps: number | null;
   height?: number;
   stepS?: number;
+  /** What its two ends say; else "… ago" and "Now". */
+  axis?: [string, string];
+  label?: string;
 }) {
   const [hover, setHover] = useState<number | null>(null);
   if (points.length < 2) {
@@ -130,7 +133,7 @@ export function FlowChart({ points, requiredBps, height = 150, stepS = 10 }: {
         }}
         onPointerLeave={() => setHover(null)}>
         <svg viewBox={`0 0 ${W} ${height}`} preserveAspectRatio="none" role="img"
-          aria-label={`Delivery over the last ${Math.round(spanS / 60)} minutes`}>
+          aria-label={label ?? `Delivery over the last ${Math.round(spanS / 60)} minutes`}>
           {[0.25, 0.5, 0.75].map((g) => <line key={g} x1="0" x2={W} y1={height * g} y2={height * g} className="flow-grid" />)}
           {SOURCES.map((s, i) => <path key={s.key} d={area(i + 1, i)} fill={s.color} className="flow-area" />)}
           {requiredBps ? <line x1="0" x2={W} y1={y(requiredBps)} y2={y(requiredBps)} className="flow-required" /> : null}
@@ -150,7 +153,8 @@ export function FlowChart({ points, requiredBps, height = 150, stepS = 10 }: {
           </div>
         )}
       </div>
-      <div className="flow-axis"><span>{spanS < 90 ? `${spanS} s ago` : `${Math.round(spanS / 60)} min ago`}</span><span>Now</span></div>
+      <div className="flow-axis">{axis ? <><span>{axis[0]}</span><span>{axis[1]}</span></>
+        : <><span>{spanS < 90 ? `${spanS} s ago` : `${Math.round(spanS / 60)} min ago`}</span><span>Now</span></>}</div>
     </div>
   );
 }

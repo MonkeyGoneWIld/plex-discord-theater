@@ -40,7 +40,26 @@ export interface Client {
    * ("buffering"), loading the start or after a seek, or playing (null).
    * Null when it hasn't said for half a minute.
    */
-  player?: { stall: "buffering" | "start" | "seek" | null; sinceMs: number | null } | null;
+  player?: {
+    stall: "buffering" | "start" | "seek" | null;
+    sinceMs: number | null;
+    /** Its last sample: how far from the room it is (null for the host), and how much it has downloaded ahead, seconds. */
+    driftS?: number | null;
+    aheadS?: number | null;
+    /** Those over the last ten minutes: [time, drift, ahead]. */
+    health?: Array<[number, number | null, number | null]>;
+  } | null;
+}
+
+/** A stream made here, by ffmpeg: how fast and on what (server engine.ts ffmpegProgress). */
+export interface StreamProgress {
+  encode: boolean;
+  state: "making" | "paused" | "giving way" | "made" | "failed";
+  speedX: number;
+  recentX: number | null;
+  aheadS: number;
+  cores: number | null;
+  gpu: Array<{ engine: string; share: number }> | null;
 }
 
 export interface Stream {
@@ -64,6 +83,8 @@ export interface Stream {
   plexClientId: string | null;
   notes: Notes;
   notesAt: number | null;
+  /** Null for Plex's streams, which don't say. */
+  progress?: StreamProgress | null;
 }
 
 export interface Room {
@@ -238,6 +259,10 @@ export interface PlayDetail {
   watched?: Record<string, Array<[number, number]>>;
   /** What each viewer's player sent another's, most first. */
   shares?: Share[];
+  /** What its players had, minute by minute: [minute's start, server, Discord's cache, other viewers] bytes. */
+  flow?: Array<[number, number, number, number]>;
+  /** Each viewer's own position over the session, by user id. */
+  positions?: Record<string, TrackPoint[]>;
 }
 
 export interface PersonSummary extends ViewerData {
@@ -291,6 +316,10 @@ export interface PersonDetail {
   /** Whom their player sent the most, and whose sent theirs the most. */
   sentTo?: SharePartner[];
   gotFrom?: SharePartner[];
+  /** Every client they were seen on, latest first, with what its player plays. */
+  clients?: Array<{ device: string; caps: string[] | null; av1Encode: boolean; first: number; last: number; sessions: number }>;
+  /** Seconds as host, co-host and viewer, in all their sessions. */
+  roleS?: { host: number; coHost: number; viewer: number };
 }
 
 export interface PlaceChannel {
@@ -423,6 +452,12 @@ export interface Graphs {
   pairs?: Array<{ from: string; fromName: string | null; to: string; toName: string | null; bytes: number }>;
   servers: Array<{ guildId: string | null; plays: number; people: number; watchedS: number }>;
   reasons: Array<{ reason: string; streams: number }>;
+  reasonDays?: Array<{ day: number; reason: string; streams: number }>;
+  heat?: Array<{ weekday: number; hour: number; plays: number; playedS: number }>;
+  clients?: Array<{ device: string | null; sessions: number; people: number; watchedS: number; stalls: number; stalledMs: number;
+    ownStreams: number; transcoded: number }>;
+  problems?: Array<{ ratingKey: string; title: string | null; shortSound: number; earlyEnd: number; burned: number; toneMapped: number;
+    sessions: number; lastAt: number; lastPlayId: number | null }>;
   upload: UploadRates & {
     since: number | null;
     sentBytes: number;

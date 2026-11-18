@@ -6,8 +6,23 @@ import { ShareList } from "./viz";
 import { BufferingCell, DataCell, Downloads, PlaceName, useLoad, Where } from "./parts";
 import { MiniChart } from "./lazy";
 import { RequestRows } from "./Requests";
+import { clientName, formatsText } from "./clients";
 
 const PAGE = 50;
+
+/** Hosting, co-hosting and viewing time, as a bar and in words. */
+function RoleSplit({ host, coHost, viewer }: { host: number; coHost: number; viewer: number }) {
+  const all = host + coHost + viewer;
+  const parts = [["Host", host, "var(--host)"], ["Co-host", coHost, "var(--cohost)"], ["Viewer", viewer, "var(--accent)"]] as const;
+  return (
+    <>
+      <div className="role-split" role="img" aria-label={parts.map(([l, s]) => `${l} ${clock(s)}`).join(", ")}>
+        {parts.map(([l, s, c]) => s > 0 && <span key={l} style={{ width: `${(s / all) * 100}%`, background: c }} title={`${l}: ${clock(s)}`} />)}
+      </div>
+      <span className="muted small">{parts.filter(([, s]) => s > 0).map(([l, s]) => `${l} ${clock(s)}`).join(" · ")}</span>
+    </>
+  );
+}
 
 const roleName = (r: string | null) => (r === "host" ? "Host" : r === "co-host" ? "Co-host" : "Viewer");
 
@@ -113,9 +128,34 @@ function PersonPage({ id, onError }: { id: string; onError: (e: unknown) => void
         <div className="tiles person-tiles">
           <div className="tile"><div className="tile-label">Data received</div><DataCell d={p} /></div>
           <div className="tile"><div className="tile-label">Sent to other viewers</div><strong>{bytes(p.upBytes)}</strong></div>
-          <div className="tile"><div className="tile-label">Buffering</div><BufferingCell d={p} /></div>
+          <div className="tile"><div className="tile-label">Buffering</div><BufferingCell d={p} />
+            {p.watchedS > 0 && p.stalls > 0 && <div className="muted small">{(p.stalls / (p.watchedS / 3600)).toFixed(1)} per hour watched</div>}</div>
           <div className="tile"><div className="tile-label">Requests</div><strong>{p.requests}</strong></div>
+          {data.roleS && (data.roleS.host + data.roleS.coHost + data.roleS.viewer) > 0 && (
+            <div className="tile"><div className="tile-label">Time by role</div>
+              <RoleSplit host={data.roleS.host} coHost={data.roleS.coHost} viewer={data.roleS.viewer} /></div>
+          )}
         </div>
+
+        <h4>Clients ({data.clients?.length ?? 0})</h4>
+        {(data.clients?.length ?? 0) === 0 ? <p className="muted">No client has been recorded.</p> : (
+          <div className="table-wrap">
+            <table className="table">
+              <thead><tr><th>Client</th><th>Plays</th><th className="num">Sessions</th><th>First seen</th><th>Last seen</th></tr></thead>
+              <tbody>
+                {data.clients!.map((c) => (
+                  <tr key={c.device}>
+                    <td><span title={c.device}>{clientName(c.device)}</span></td>
+                    <td className="small">{c.caps ? formatsText(c.caps, c.av1Encode) : "Not recorded"}</td>
+                    <td className="num">{c.sessions}</td>
+                    <td className="nowrap">{dateTime(c.first)}</td>
+                    <td className="nowrap">{dateTime(c.last)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
 
         {(sentTo.length > 0 || gotFrom.length > 0) && (
           <>

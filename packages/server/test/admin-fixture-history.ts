@@ -75,7 +75,8 @@ export async function backfill(dbPath: string, now: number, days = 45): Promise<
         variantKey: "v0", hlsSessionId: `past-${n}-0`, audioStreamId: 1, subtitleStreamId: 0, quality: 0, ownerUserId: null,
         sessionOffset: 0, idleS: null, viewers: people.map(([id]) => id), isHostStream: true, engine: "ffmpeg",
         decision: reencode ? "transcode" : "copy", reason: reencode ? pick(REASONS) : null, summary: "", kbps: reencode ? 4000 : 8000 + Math.floor(rnd() * 10_000),
-        kbpsSource: null, plexTranscodeKey: null, plexClientId: null, notes: {}, notesAt: null,
+        kbpsSource: null, plexTranscodeKey: null, plexClientId: null,
+        notes: reencode && n % 6 === 0 ? { range: "HDR10 → SDR (tone-mapped)" } : {}, notesAt: null,
       }];
       if (people.length > 1 && rnd() < 0.3) {
         const own = people[people.length - 1][0];
@@ -90,7 +91,7 @@ export async function backfill(dbPath: string, now: number, days = 45): Promise<
         clients: people.map(([userId, username], i) => ({
           userId, username, role: i === 0 ? "host" : "viewer", connected: true, watching: true, away: false, loading: false,
           joinedAt: g, variantKey: streams.find((s) => (s.viewers as string[]).includes(userId))?.variantKey ?? "v0",
-          subtitleStreamId: 0, quality: 0, caps: i === 0 ? ["hevc", "opus", "eac3"] : [], av1Encode: false,
+          subtitleStreamId: 0, quality: 0, caps: i === 0 ? ["hevc", "opus", "eac3"] : (i + n) % 2 ? ["hevc"] : [], av1Encode: false,
           device: [AGENTS.desktop, AGENTS.firefox, AGENTS.chrome, AGENTS.vesktop, AGENTS.edge][(i + n) % 5],
         })),
         streams,
@@ -101,13 +102,32 @@ export async function backfill(dbPath: string, now: number, days = 45): Promise<
       rec.tick(g);
       g += 15_000;
       Object.assign(room, { ratingKey, title, playing: true });
+      if (ratingKey === "80002") rec.streamIssue({ at: g, hlsSessionId: `past-${n}-0`, ratingKey, kind: "short sound",
+        detail: { soundEndsS: minutes * 60 - 22.5, pictureEndsS: minutes * 60 } });
       rec.transport({ at: g, roomId, type: "play", userId: hostId, username: people[0][1], role: "host", fromS: 0, toS: 0, ratingKey, title } as never);
       rec.tick(g);
       const start = g;
-      people.forEach(([userId], i) => rec.clientLog({ at: g, userId, clientId: `past-${n}-${i}`, entries: [
-        { t: g, level: "LOG", tag: "Health", msg: "sample", data: { session: "past", httpMB: 0, p2pMB: 0, edgeHitMB: "0", edgeMB: "0", peerKey: keyOf(userId) } },
-      ] }));
+      people.forEach(([userId], i) => {
+        const loadMs = 700 + Math.floor(rnd() * 3_500);
+        rec.clientLog({ at: g + loadMs + 200, userId, clientId: `past-${n}-${i}`, entries: [
+          { t: g, level: "LOG", tag: "Health", msg: "sample", data: { session: "past", httpMB: 0, p2pMB: 0, edgeHitMB: "0", edgeMB: "0", peerKey: keyOf(userId) } },
+          { t: g + 100, level: "WARN", tag: "Video", msg: "waiting (buffer starved)", data: { posS: 0, paused: false, seeking: false, readyState: 0 } },
+          { t: g + 100 + loadMs, level: "LOG", tag: "Video", msg: "playing", data: { posS: 0, paused: false, seeking: false, readyState: 3 } },
+        ] as never });
+      });
       const length = Math.round(minutes * (0.4 + rnd() * 0.6)) * 60_000;
+      // What each will have had by the end, and from the others: known now so each sample can say its share so far.
+      const had = people.map(() => (length / 1000) * (reencode ? 0.5 : 1.1) * (0.8 + rnd() * 0.4));
+      const got = had.map((mb, i) => (i > 0 && rnd() < 0.4 ? mb * 0.2 : 0));
+      const hits = people.map(() => 0.25 + rnd() * 0.5);
+      const detailed = d >= Math.floor(now / DAY) - 10;
+      // Every other session somebody pauses a quarter of the way in, for a while; every fifth, a viewer asks for host.
+      const pauseAt = n % 2 === 0 ? Math.round(length / 4 / 10_000) * 10_000 : null;
+      const pauser = people[Math.floor(rnd() * people.length)];
+      const pauseFor = (2 + Math.floor(rnd() * 8)) * 10_000;
+      let pausedS = 0;
+      // Every third session one viewer switches away from the Discord window for a few minutes.
+      const awayAt = n % 3 === 1 && people.length > 1 ? Math.round(length / 2 / 10_000) * 10_000 : null;
       // Every third session: Skip Intro, then a seek back and one forward on the timeline.
       const seeks: Array<[number, number, string]> = n % 3 === 0
         ? [[30_000, 75, "skip intro"], [Math.round((length * 0.4) / 10_000) * 10_000, -300, "timeline"],
@@ -118,6 +138,27 @@ export async function backfill(dbPath: string, now: number, days = 45): Promise<
       const moves = n % 3 === 0 && people.length > 1 ? Math.round(length / 2 / 10_000) * 10_000 : null;
       while (g - start < length) {
         g += 10_000;
+        if (pauseAt !== null && g - start === pauseAt) {
+          rec.transport({ at: g, roomId, type: "pause", userId: pauser[0], username: pauser[1], role: pauser === people[0] ? "host" : "viewer",
+            fromS: room.positionS, toS: room.positionS, ratingKey, title } as never);
+          room.playing = false;
+        }
+        if (pauseAt !== null && g - start === pauseAt + pauseFor) {
+          rec.transport({ at: g, roomId, type: "resume", userId: hostId, username: people[0][1], role: "host",
+            fromS: room.positionS, toS: room.positionS, ratingKey, title } as never);
+          room.playing = true;
+        }
+        if (!room.playing) pausedS += 10;
+        if (awayAt !== null && g - start === awayAt) room.clients[1].away = true;
+        if (awayAt !== null && g - start === awayAt + 180_000) room.clients[1].away = false;
+        if (n % 5 === 0 && people.length > 1 && g - start === 60_000) {
+          rec.hostRequest({ at: g, roomId, outcome: "asked", userId: people[1][0], username: people[1][1], hostId, hostName: people[0][1],
+            away: false, waitS: 120 });
+        }
+        if (n % 5 === 0 && people.length > 1 && g - start === 80_000) {
+          rec.hostRequest({ at: g, roomId, outcome: n % 10 === 0 ? "declined" : "ended", userId: people[1][0], username: people[1][1],
+            hostId, hostName: people[0][1], ...(n % 10 === 0 ? {} : { why: "host changed" as const }) });
+        }
         if (moves !== null && g - start === moves) room.clients.at(-1).device = AGENTS.iphone;
         // Every fourth session the host makes the second person co-host a third of the way in,
         // and hands them host two thirds in, staying on as co-host.
@@ -135,17 +176,23 @@ export async function backfill(dbPath: string, now: number, days = 45): Promise<
         }
         const seek = seeks.find(([after]) => after === g - start);
         if (seek) {
-          const fromS = (g - start) / 1000 + ahead;
+          const fromS = (g - start) / 1000 + ahead - pausedS;
           ahead = Math.max(-(g - start) / 1000, ahead + seek[1]);
           rec.transport({ at: g, roomId, type: "seek", userId: hostId, username: people[0][1], role: "host", fromS,
-            toS: (g - start) / 1000 + ahead, ratingKey, title, cause: seek[2] } as never);
+            toS: (g - start) / 1000 + ahead - pausedS, ratingKey, title, cause: seek[2] } as never);
         }
-        room.positionS = (g - start) / 1000 + ahead;
+        room.positionS = (g - start) / 1000 + ahead - pausedS;
         rec.tick(g);
+        if (detailed) {
+          const share = Math.min(1, (g - start) / length);
+          people.forEach(([userId], i) => rec.clientLog({ at: g, userId, clientId: `past-${n}-${i}`, entries: [{ t: g, level: "LOG", tag: "Health", msg: "sample", data: {
+            session: "past", httpMB: had[i] * share, p2pMB: got[i] * share, edgeHitMB: (had[i] * share * hits[i]).toFixed(1),
+            edgeMB: (had[i] * share * 0.9).toFixed(1), peerKey: keyOf(userId),
+            posS: Math.max(0, (room.positionS as number) - (i ? 0.4 * i : 0)), paused: !room.playing, playedS: room.playing ? 10 : 0,
+          } }] as never }));
+        }
       }
-      // What each had from the others, and who sent it: the one before them, or the host.
-      const had = people.map((_, i) => ((g - start) / 1000) * (reencode ? 0.5 : 1.1) * (0.8 + rnd() * 0.4));
-      const got = had.map((mb, i) => (i > 0 && rnd() < 0.4 ? mb * 0.2 : 0));
+      // Who sent what each had from the others: the one before them, or the host.
       const sent = people.map(() => ({} as Record<string, number>));
       got.forEach((mb, i) => {
         if (mb <= 0) return;
@@ -154,7 +201,7 @@ export async function backfill(dbPath: string, now: number, days = 45): Promise<
       });
       people.forEach(([userId], i) => {
         const mb = had[i];
-        const hit = 0.25 + rnd() * 0.5;
+        const hit = hits[i];
         const upMB = Object.values(sent[i]).reduce((a, b) => a + b, 0);
         const entries: Any[] = [{ t: g, level: "LOG", tag: "Health", msg: "sample", data: {
           session: "past", httpMB: mb, p2pMB: got[i], edgeHitMB: (mb * hit).toFixed(1), edgeMB: (mb * 0.9).toFixed(1),

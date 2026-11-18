@@ -169,7 +169,7 @@ export function App() {
           {tab === "places" && <Places onError={onError} />}
           {tab === "requests" && <Requests onError={onError} />}
           {tab === "caches" && <Caches onError={onError} />}
-          {tab === "logs" && <Logs onError={onError} />}
+          {tab === "logs" && <Logs onError={onError} route={id} />}
           {tab === "settings" && <Settings onError={onError} />}
         </main>
       </div>

@@ -9,7 +9,11 @@
  */
 import { eventDetails, eventText, eventTone, finishedAt, groupOf, jumpsOf, newestFirst, positionAt, positionTicks, streamDiff, trackName, unionParts, variantParts } from "../admin/events";
 import { clientName, clientsOf, rolesOf } from "../admin/clients";
-import type { PlayEvent, TrackPoint } from "../admin/types";
+import { awayOf, deliveryParts, loadTimes, pausesByPerson, pausesOf, streamAt } from "../admin/session";
+import { drift } from "../admin/timeline";
+import { progressText } from "../admin/streams";
+import { sessionLogsHref } from "../admin/Logs";
+import type { PlayEvent, PlayStream, TrackPoint } from "../admin/types";
 
 let pass = 0;
 let fail = 0;
@@ -227,6 +231,72 @@ check("  its details: how, and the hosts either side; a co-host's, who gave it",
   [[["From", "Host"], ["To", "Co-host"], ["How", "The host handed it over"], ["Host before", "alex"], ["Host after", "sam"]],
     [["From", "Viewer"], ["To", "Co-host"], ["How", "Given by the host"], ["By", "alex"]],
     ["Host away from Discord", "Yes"]]);
+
+console.log("\n— requests for host, and a title's short sound —");
+check("asked, declined, and ended unanswered: who and why",
+  [eventText(ev("asked for host", { host: "alex", away: true, waitS: 30 })), eventText(ev("asked for host", { host: "alex", away: false, waitS: 15 })),
+    eventText(ev("request declined", { host: "alex" })),
+    eventText(ev("request ended", { host: "alex", why: "asker left" })), eventText(ev("request ended", { host: "alex", why: "host changed" }))],
+  ["robin requested host from alex, who was away from the Discord window", "robin requested host from alex",
+    "alex declined robin's request for host",
+    "robin's request for host ended: they left before alex answered", "robin's request for host ended: the host role moved before alex answered"]);
+check("  in People; the short sound in Streams",
+  ["asked for host", "request declined", "request ended", "short sound"].map((k) => groupOf(ev(k, {}))), ["people", "people", "people", "streams"]);
+check("  the time the host had to answer, as a time",
+  eventDetails(ev("asked for host", { host: "alex", away: true, waitS: 30 })).find(([l]) => l === "Time to answer"), ["Time to answer", "30 s"]);
+check("short sound: where the sound and the picture end",
+  [eventText(ev("short sound", { soundEndsS: 5400, pictureEndsS: 5460, ratingKey: "173916" }, null)),
+    eventDetails(ev("short sound", { soundEndsS: 5400, pictureEndsS: 5460, ratingKey: "173916" }, null))],
+  ["The sound stops at 1:30:00, before the picture ends at 1:31:00: it was read on its own and filled with silence to the end",
+    [["Sound ends at", "1:30:00"], ["Picture ends at", "1:31:00"], ["Plex item", "173916"]]]);
+
+console.log("\n— a session's cards: away, pauses, loading —");
+const by = (kind: string, userId: string, at: number, detail: Record<string, unknown> | null = null, posS: number | null = null, username = userId === "1" ? "robin" : "sam"): PlayEvent =>
+  ({ id: ++id, at, kind, userId, username, posS, detail }) as PlayEvent;
+check("away from Discord: each stretch until back, left, or the session's end; others' not counted",
+  awayOf([by("away from Discord", "1", 1000), by("back in Discord", "1", 4000), by("away from Discord", "2", 2000),
+    by("away from Discord", "1", 6000), by("left", "1", 9000), by("away from Discord", "1", 10000)], "1", 12000),
+  [{ from: 1000, to: 4000 }, { from: 6000, to: 9000 }, { from: 10000, to: 12000 }]);
+const pauses = pausesOf([by("pause", "1", 1000, null, 60), by("resume", "1", 5000), by("pause", "2", 8000, null, 64), by("stop", "2", 9000),
+  by("pause", "1", 10000, null, 65)], 15000);
+check("pauses: who, where in the title, how long; one still paused at the end",
+  pauses.map((p) => [p.username, p.posS, p.ms, p.open]), [["robin", 60, 4000, false], ["sam", 64, 1000, false], ["robin", 65, 5000, true]]);
+check("  by who paused: how often, for how long, the longest; the most paused first",
+  pausesByPerson(pauses).map((p) => [p.username, p.count, p.totalMs, p.longestMs]), [["robin", 2, 9000, 5000], ["sam", 1, 1000, 1000]]);
+const loads = [by("loaded at start", "1", 0, { ms: 1200 }), by("loaded at start", "2", 0, { ms: 3000 }),
+  by("loaded after seek", "1", 0, { ms: 800 }), by("loaded after seek", "1", 0, { ms: 1000 }), by("loaded after seek", "1", 0, { ms: "?" })];
+check("loading times: a viewer's at the start and after seeks; the session's across everyone",
+  [loadTimes(loads, "1"), loadTimes(loads, null).start, loadTimes(loads, "3")],
+  [{ start: { count: 1, avgMs: 1200, longestMs: 1200 }, seek: { count: 2, avgMs: 900, longestMs: 1000 } },
+    { count: 2, avgMs: 2100, longestMs: 3000 }, { start: null, seek: null }]);
+
+console.log("\n— coverage by how it reached the viewer —");
+const stream = (variantKey: string, decision: string, ownerUserId: string | null): PlayStream =>
+  ({ id: ++id, hlsSessionId: `s${id}`, variantKey, decision, ownerUserId, startedAt: 0, endedAt: null }) as PlayStream;
+const streams = [stream("1:0", "copy", null), stream("2:0", "transcode", "1")];
+const moved = [by("stream changed", "1", 25000, { from: "2:0", to: "1:0" })];
+check("the stream a viewer was on: their own until they moved, then the one they moved to; someone else, the shared one",
+  [streamAt(moved, streams, "1", 1000)?.decision, streamAt(moved, streams, "1", 26000)?.decision, streamAt(moved, streams, "2", 1000)?.decision],
+  ["transcode", "copy", "copy"]);
+const theirs: TrackPoint[] = [[0, 0, 1], [10000, 10, 1], [20000, 20, 1], [30000, 30, 1], [40000, 40, 1], [50000, 100, 1], [60000, 110, 0]];
+check("  what they watched by it: transcoded until the move, direct after; a jump is not watched",
+  deliveryParts(theirs, moved, streams, "1"),
+  [{ from: 0, to: 30, decision: "transcode" }, { from: 30, to: 40, decision: "copy" }, { from: 100, to: 110, decision: "copy" }]);
+
+console.log("\n— live: sync, encoding, logs —");
+check("distance from the room, said", [drift(0.3), drift(2.44), drift(-3)], ["in sync", "2.4 s ahead", "3.0 s behind"]);
+check("encoding: its speed lately, how far ahead, what it uses",
+  [progressText({ encode: true, state: "making", speedX: 3, recentX: 4.2, aheadS: 190, cores: 1.2, gpu: [{ engine: "video", share: 0.34 }] }),
+    progressText({ encode: true, state: "making", speedX: 2, recentX: null, aheadS: 40, cores: 2, gpu: [] }),
+    progressText({ encode: false, state: "made", speedX: 9, recentX: null, aheadS: 0, cores: null, gpu: null })],
+  ["Encoding at 4.2× real time · 3:10 ahead of the watcher · GPU video 34% · CPU 1.2 cores",
+    "Encoding at 2.0× real time · 0:40 ahead of the watcher · no GPU (CPU encode) · CPU 2 cores",
+    "Copying done: made to the end of the file"]);
+const day = Date.UTC(2026, 10, 18, 23, 50);
+check("logs for a session: its lines in its UTC day's file, both days' over midnight",
+  [sessionLogsHref(day - 3_600_000, day).map(decodeURIComponent), sessionLogsHref(day, day + 1_800_000).map(decodeURIComponent)],
+  [[`#logs/file=theater-2026-11-18.log&from=${day - 3_600_000}&to=${day}`],
+    [`#logs/file=theater-2026-11-18.log&from=${day}&to=${day + 1_800_000}`, `#logs/file=theater-2026-11-19.log&from=${day}&to=${day + 1_800_000}`]]);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail > 0 ? 1 : 0);

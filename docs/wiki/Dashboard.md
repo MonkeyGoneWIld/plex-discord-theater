@@ -97,6 +97,12 @@ Updated every 2 seconds. The browser tab shows how many sessions are active.
 - **Data sources for this session.** The session's total, split the same way.
 - **Peer-to-peer sharing for this session.** Who sent video to whom, and how
   much, largest first.
+- **Sync and buffer, last 10 minutes.** Two charts with a line per viewer:
+  how far each player is from the room (the shaded band is the 2 seconds
+  within which a player corrects itself), and how much video each has
+  downloaded ahead of where it is playing. Hover for each viewer's figure.
+- **Session so far.** The History page's session overview for this session,
+  refreshed every 15 seconds, with a link to the full one.
 
 **Each stream** reads at a glance:
 
@@ -104,6 +110,11 @@ Updated every 2 seconds. The browser tab shows how many sessions are active.
 - The video and the audio from source to output. Green means unchanged, amber
   means converted.
 - For a transcode, the reason in a sentence.
+- For a stream the server makes itself, how fast it is being made against
+  real time, how far ahead of the viewer it is, and what it is using: the
+  share of the GPU's video engine and how many CPU cores (on Linux with a GPU
+  passed through). A stream that has caught up pauses until the viewer needs
+  more, and says so. Plex doesn't report this for its own transcodes.
 
 Select a stream for its details, in four groups: video, audio, delivery and
 identifiers. Audio and subtitle tracks show by name, with Plex's number beside.
@@ -112,7 +123,9 @@ identifiers. Audio and subtitle tracks show by name, with Plex's number beside.
 app, the Discord app on a phone, Vesktop, or a browser, and the system), and
 their player's state, from what it last
 reported: watching, loading (as they start, or after a seek), buffering and
-for how long, away or disconnected. Then which stream they are on, how long
+for how long, out of sync (more than 2 seconds from the room), away or
+disconnected. Then which stream they are on, how far they are from the room,
+how much they have downloaded ahead (amber under 10 seconds, with its trend), how long
 they have watched, the data they received with its split, what they sent to
 other viewers, and their buffering. Loading is not buffering and isn't counted as it. Select a viewer
 for their Discord user ID, quality limit, subtitle track by name, what
@@ -133,20 +146,24 @@ split, and how often it buffered.
 Search finds a title, a viewer's name or Discord user ID, or a server or
 channel ID. **CSV** and **JSON** export every session the search finds.
 
-Select a session to open it:
+Select a session to open it. **Logs for this session** opens the server log
+of that day, filtered to the session's time (a session over midnight UTC has a
+link for each day's file).
 
 ![A session in the history: its summary, viewers, stream and overview chart](https://raw.githubusercontent.com/MonkeyGoneWIld/plex-discord-theater/main/docs/screenshots/dashboard-session.png)
 
 | Section | Shows |
 |---|---|
-| Summary | How it ended and who ended it, time played, viewers, streams, data delivered and buffering, then the data sources |
-| Viewers | Each person's role and client, the streams they were on, watch time, data received, data sent to other viewers, and buffering. Select a viewer for their Discord user ID, when they were first and last seen, their role over the session (host, co-host or viewer, and when each began), each client they watched on and when with what that client can play (a viewer who moved from their computer to their phone shows both), and where their data came from and went. A host is in the room before they choose a title, so what they joined on and as is taken from just before the session |
+| Summary | How it ended and who ended it, time played, viewers, streams, data delivered and buffering, then the data sources: in total, and minute by minute over the session as a chart (for sessions recorded from this version on) |
+| Viewers | Each person's role and client, the streams they were on, watch time, data received, data sent to other viewers, and buffering. Select a viewer for their Discord user ID, when they were first and last seen, how long their player took to load at the start and after seeks, how long they were away from the Discord window, their role over the session (host, co-host or viewer, and when each began), each client they watched on and when with what that client can play (a viewer who moved from their computer to their phone shows both), and where their data came from and went. A host is in the room before they choose a title, so what they joined on and as is taken from just before the session |
 | Streams | Each stream, as on Now Playing |
-| Session overview | A chart of the session over time: one row for playback (playing, paused, waiting for the host), one for where in the title it was, one for each stream and one for each viewer, with marks where something changed. Along the foot of each viewer's bar, a gold line shows when they were host and a violet one when they were co-host. The position line is green while playing and dashed while paused; each seek is a step labelled with what made it (Skip Intro, Skip Credits, Jump back, Jump forward), or for one on the seek bar how far it went (Seek +20:00, Seek −5:00), and the end of the title is labelled Finished. Lines across it mark points in the title, labelled on the left: every 5 minutes for an episode, every 30 for a film. Buffering and player errors sit on the position line where they happened, so a bad part of a file shows. Where labels would overlap, as on a phone, some are left to their mark's hover. Hover any bar, line or mark for details. |
-| Viewing coverage | One bar per viewer across the whole title, and one for all viewers: the parts they saw, with buffering (a red bar) and player errors (a red diamond) where they happened in the title. Above them, a Seeks row draws each seek as an arc from where it left to where it landed, labelled as on the position line, and a tick where the title finished. |
+| Session overview | A chart of the session over time: one row for playback (playing, paused, waiting for the host), one for where in the title it was, one for each stream and one for each viewer, with marks where something changed. Along the foot of each viewer's bar, a white line (black in the light theme) shows when they were host and a violet one when they were co-host; a hatched stretch marks when they had switched away from the Discord window. Hover anywhere for a line across every row and what each was doing at that moment: playback, the position, each stream, and each viewer's role, stream, buffering and distance from the room. **Each viewer** draws every viewer's own position line beside the room's, so a player that fell behind shows. The position line is green while playing and dashed while paused; each seek is a step labelled with what made it (Skip Intro, Skip Credits, Jump back, Jump forward), or for one on the seek bar how far it went (Seek +20:00, Seek −5:00), and the end of the title is labelled Finished. Lines across it mark points in the title, labelled on the left: every 5 minutes for an episode, every 30 for a film. Buffering and player errors sit on the position line where they happened, so a bad part of a file shows. Where labels would overlap, as on a phone, some are left to their mark's hover. Hover any bar, line or mark for details. |
+| Viewing coverage | One bar per viewer across the whole title, and one for all viewers: the parts they saw, with buffering (a red bar) and player errors (a red diamond) where they happened in the title. For sessions recorded from this version on, each viewer's parts are coloured by how the video reached them: green where it was sent unchanged (direct play or direct stream), amber where it was transcoded. Above them, a Seeks row draws each seek as an arc from where it left to where it landed, labelled as on the position line, and a tick where the title finished. |
+| Pauses | Who paused, how often, for how long in all, the longest, and each pause's time and place in the title |
+| Loading times | How long each viewer's player took to show the picture at the start and after seeks, on average, how often and at most, and the session's average |
 | Peer-to-peer sharing | Who sent video to whom, and how much, largest first |
 | Key moments | The events that explain the session, newest first, each with its reason: a stream starting and why, the host changing a track and who moved with them, a viewer changing stream, quality or subtitles, a change of host or co-host and how it happened, Skip Intro and Skip Credits, a stream ending early, long buffering, and errors. This is where to look when a second stream started part way through. |
-| All events | Every event, newest first, with filters for playback, viewers, streams and tracks, and loading, buffering and errors. Each event names who did it and how: a seek says whether it came from Skip Intro, Skip Credits, the jump controls or the seek bar, a viewer moving to another client says from which to which, a change of host says how it happened (handed over; requested and accepted; requested with no answer in time, and whether the host was away from the Discord window; taken back by the host it was passed from; the host leaving, or not coming back in time; the host reconnecting in time), a co-host says who gave or removed it, and a session's end says whether the title finished, the host closed the player, started the next episode or started a different title. Select an event for its details. |
+| All events | Every event, newest first, with filters for playback, viewers, streams and tracks, and loading, buffering and errors. Each event names who did it and how: a seek says whether it came from Skip Intro, Skip Credits, the jump controls or the seek bar, a viewer moving to another client says from which to which, a change of host says how it happened (handed over; requested and accepted; requested with no answer in time, and whether the host was away from the Discord window; taken back by the host it was passed from; the host leaving, or not coming back in time; the host reconnecting in time), a co-host says who gave or removed it, a request for host that came to nothing says so (declined by the host, or ended because the asker left or the role moved first, with whether the host was away from the Discord window and how long they had to answer), a title whose sound stops before its picture says where each ends (it is filled with silence to the end), and a session's end says whether the title finished, the host closed the player, started the next episode or started a different title. Select an event for its details. |
 
 Loading the start of a stream, or after a seek, is shown as loading, not
 buffering. History recorded by earlier versions is corrected the first time
@@ -163,12 +180,22 @@ in your local time, and a session counts on the day it started.
   transcoded, and buffering.
 - Per day: sessions, watch time, data by source, streams direct or
   transcoded, buffering, launches and requests.
-- Transcode reasons, the most common first.
-- Sessions by hour of the day and by weekday.
+- Transcode reasons, the most common first, and over time: the three most
+  common each in a colour, the rest together.
+- Sessions by hour of the day and by weekday, and both together as a grid:
+  darker is busier.
 - The most watched titles, the most active users, and the most active Discord
   servers.
 - The top peer-to-peer sharers, by data sent to other viewers, and the
   largest transfers between two viewers.
+- **Buffering and transcodes by client.** Each viewer's session by the
+  client they finished it on: sessions, watch time, buffering, buffering per
+  hour watched, and how many of the streams made for one viewer had to be
+  transcoded.
+- **Titles that needed a workaround.** Titles whose sound stops before the
+  picture, whose stream ended before the length Plex reports, whose subtitles
+  were burned into the picture, or whose HDR was tone-mapped to SDR, with how
+  often and a link to the latest session.
 
 **Server upload** is everything the server's port sent in the period: video,
 playlists, subtitles and the page, measured as it leaves. The page says since
@@ -190,8 +217,11 @@ when.
 Everyone who has used the Activity, most recently active first: their Discord
 user ID, sessions, sessions hosted, launches, watch time, data received, data
 sent to other viewers, buffering, requests, and the last title they watched.
-Select a user for who they sent video to and received it from, the servers and
-channels they used, every session they were in, and every title they
+Select a user for their time as host, co-host and viewer, their buffering per
+hour watched, every client they used with what each plays (the formats its
+player decodes, such as HEVC, 10-bit, 4K, AV1 or E-AC3) and how many sessions
+it was used for, who they sent video to and received it from, the servers
+and channels they used, every session they were in, and every title they
 requested.
 
 ## Discord Servers
@@ -229,7 +259,9 @@ made shows as such.
 The server's log files, newest first. Filter by level, tag or text, and show
 the last 200 to 5000 lines. **Follow** refreshes every 5 seconds. Lines
 reported by a viewer's player are labelled with that player. Times are in
-your local time; each file holds one day in UTC.
+your local time; each file holds one day in UTC. Opened from a session in
+History, it shows only the lines written during that session; **Show the
+whole file** clears that.
 
 ## System
 
@@ -255,7 +287,11 @@ folder:
 - **Each stream:** direct or transcoded and why, its tracks, quality and
   bitrate, who it was made for, and when it started and ended.
 - **Each event:** plays, pauses and seeks with who did them, people joining
-  and leaving, track and quality changes, buffering and errors.
+  and leaving, switching away from the Discord window, track and quality
+  changes, changes of host and requests for it, how long players took to
+  load, buffering and errors, and titles whose stream needed a workaround.
+- **Data by the minute:** what a session's players had from the server,
+  Discord's cache and other viewers, each minute.
 - **Where in the title:** the room's position, and each player's, every 10
   seconds.
 - **Usage:** each launch of the Activity and each person joining a room.

@@ -50,7 +50,7 @@ import { logEvent } from "../logger.js";
 import { LruMap } from "../lru.js";
 import { streamBandwidth, type Bandwidth } from "../stream-bandwidth.js";
 import { ffmpegPath, lookaheadS, maxEncodes } from "./config.js";
-import { cpuUse, gpuUse, readUse, sampleGpu, type GpuSample } from "./gpu-use.js";
+import { cpuUse, gpuUse, readUse, sampleGpu, useFigures, type GpuSample } from "./gpu-use.js";
 import { dropHot, hotSegment, keepHot } from "./hot-segments.js";
 import { labelInitForHdr, labelInitForSdr, type HdrMeta } from "./hdr-init.js";
 import { COPY_CLOCK_OFFSET_S } from "./plan.js";
@@ -216,6 +216,8 @@ interface Run {
   gpuAtStart: GpuSample | null;
   /** And lately, for what it used by the time it ended, when they can't be read any more. */
   gpuLately: GpuSample | null;
+  /** For the dashboard: where it had made the film to, and its counts, a few seconds ago (ffmpegProgress). */
+  probe?: { at: number; edge: number; sample: GpuSample | null; speedX: number | null; cores: number | null; gpu: Array<{ engine: string; share: number }> | null };
   lastAlive: number;
 }
 
@@ -933,6 +935,41 @@ export function ffmpegEncodesRunning(exceptSession?: string): number {
   let n = 0;
   for (const run of runs.values()) if (run.encode && !run.ended && !run.failed && run.sessionId !== exceptSession) n++;
   return n;
+}
+
+/** What the dashboard shows of a run: how fast it makes the film, how far ahead it is, what it uses. */
+export interface FfmpegProgress {
+  encode: boolean;
+  /** "making", "paused" (far enough ahead), "giving way" (to another stream starting), "made" (to the end), "failed". */
+  state: "making" | "paused" | "giving way" | "made" | "failed";
+  /** Film seconds made for each second of clock, over its whole run and over the last few seconds. */
+  speedX: number;
+  recentX: number | null;
+  /** How far past the watcher it has made the film, seconds. */
+  aheadS: number;
+  /** CPU cores' worth, and each GPU engine's share (a re-encode on the GPU), over the last few seconds. */
+  cores: number | null;
+  gpu: Array<{ engine: string; share: number }> | null;
+}
+
+const PROBE_EVERY_MS = 4_000;
+
+/** For the Now Playing page: the run behind this session, if it is made here. */
+export function ffmpegProgress(sessionId: string, now = Date.now()): FfmpegProgress | null {
+  const run = bySession.get(sessionId);
+  if (!run) return null;
+  const edge = edgeOf(run);
+  const p = run.probe;
+  if (!p || now - p.at >= PROBE_EVERY_MS) {
+    const sample = run.proc?.pid && run.proc.exitCode === null ? sampleGpu(run.proc.pid) : null;
+    const spanS = p ? (now - p.at) / 1000 : 0;
+    const figures = p ? useFigures(p.sample, sample) : { cores: null, gpu: null };
+    run.probe = { at: now, edge, sample, speedX: p && spanS > 0 ? Math.round(((edge - p.edge) / spanS) * 10) / 10 : null,
+      cores: figures.cores, gpu: run.encode ? figures.gpu : null };
+  }
+  const state = run.failed ? "failed" : run.ended ? "made" : run.yielding > 0 ? "giving way" : run.paused ? "paused" : "making";
+  return { encode: run.encode, state, speedX: speed(run).speedX, recentX: run.probe!.speedX, aheadS: round3(edge - run.positionS),
+    cores: run.probe!.cores, gpu: run.probe!.gpu };
 }
 
 /** Whether this session's stream is made here, by ffmpeg. */

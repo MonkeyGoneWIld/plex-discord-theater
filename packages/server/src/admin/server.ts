@@ -188,11 +188,14 @@ export function createAdminApp(opts: AdminOptions): express.Express {
     }
     const level = q.level === "warn" || q.level === "error" ? q.level : undefined;
     const limit = typeof q.limit === "string" ? Number(q.limit) || undefined : undefined;
+    const ms = (v: unknown) => (typeof v === "string" && /^\d{1,15}$/.test(v) ? Number(v) : undefined);
     const result = await readLog(name, {
       q: typeof q.q === "string" ? q.q.slice(0, 200) : undefined,
       tag: typeof q.tag === "string" ? q.tag.slice(0, 60) : undefined,
       level,
       limit,
+      from: ms(q.from),
+      to: ms(q.to),
     });
     if (!result) {
       res.status(404).json({ error: "No such log file" });

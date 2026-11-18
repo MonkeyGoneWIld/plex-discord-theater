@@ -19,6 +19,13 @@ process.env.PDT_HOST_REQUEST_AWAY_MS = "200";
 const { attachWebSocketServer, closeWebSocketServer, adminRooms } = await import("../src/services/sync.js");
 const { createSession } = await import("../src/middleware/auth.js");
 const { instanceHosts } = await import("../src/routes/discord.js");
+const { setAdminHooks } = await import("../src/services/admin-hooks.js");
+type Said = import("../src/services/admin-hooks.js").HostRequestEvent;
+// What the dashboard's history is told of each request that came to nothing of its own.
+const said: Said[] = [];
+setAdminHooks({ hostRequest: (e) => { said.push(e); } });
+const saidIn = (roomId: string) => said.filter((e) => e.roomId === roomId)
+  .map((e) => [e.outcome, e.username, e.hostName, e.away ?? false, e.why ?? null]);
 
 let pass = 0;
 let fail = 0;
@@ -106,6 +113,9 @@ console.log("\n— one request at a time, and a no —");
   check("  two hours for the asker", Math.round((v.blocked.until - v.now) / 60_000), 120);
   const w = cy.last("host-request")!;
   check("  fifteen minutes for the room", Math.round((w.blocked.until - w.now) / 60_000), 15);
+  check("the history is told: asked, by whom of whom; declined; the second asker never asked", saidIn("hr-1"),
+    [["asked", "bea", "host", false, null], ["declined", "bea", "host", false, null]]);
+  check("  how long the host had to answer", said.find((e) => e.roomId === "hr-1")?.waitS, 1);
   await sleep(700);
   check("the host keeps the role", isHost(host), true);
 
@@ -125,6 +135,7 @@ console.log("\n— no answer, an away host, and taking it back —");
   await sleep(60);
   const v = bea.last("host-request")!;
   check("an away host has the short wait", v.active.endsAt - v.now <= 200, true);
+  check("  the history is told the host was away when asked", saidIn("hr-3"), [["asked", "bea", "host", true, null]]);
   await sleep(300);
   check("no answer: the role passes to the asker", [isHost(bea), isHost(host)], [true, false]);
   check("  the history is told how: unanswered, the host away", roleWhy("hr-3"), ["request not answered", "host", "bea", true]);
@@ -156,6 +167,7 @@ console.log("\n— a host who goes away mid-countdown, an asker who leaves —")
   bea.close();
   await sleep(100);
   check("who asked left: the request ends", cy.view(), { asker: null, blocked: null });
+  check("  the history is told it ended, and why", saidIn("hr-4"), [["asked", "bea", "host", false, null], ["ended", "bea", "host", false, "asker left"]]);
   await sleep(300);
   check("  and the host keeps the role", isHost(host), true);
 
@@ -167,6 +179,7 @@ console.log("\n— a host who goes away mid-countdown, an asker who leaves —")
   check("given: the asker is host", [isHost(cy), isHost(host)], [true, false]);
   check("  the history is told: accepted", roleWhy("hr-4"), ["request accepted", "host", "cy", false]);
   check("  and nobody may take it back", host.last("host-request")!.reclaimUntil, null);
+  check("  accepted is the role change, not a request that came to nothing", saidIn("hr-4").length, 3);
   for (const c of [host, cy]) c.close();
   await sleep(60);
 }

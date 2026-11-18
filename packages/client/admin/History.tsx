@@ -13,7 +13,9 @@ import { clientName, clientsOf, formatsText, rolesOf } from "./clients";
 import { MiniChart } from "./lazy";
 import { Icon } from "./icons";
 import { Poster, titleLine, useTitles } from "./titles";
-import { Avatar, pct, ShareList, SplitBar } from "./viz";
+import { Avatar, FlowChart, pct, ShareList, SplitBar, type FlowPoint } from "./viz";
+import { awayOf, loadTimes, pausesByPerson, pausesOf, type LoadStats } from "./session";
+import { sessionLogsHref } from "./Logs";
 
 const PAGE = 50;
 
@@ -176,6 +178,9 @@ function PlayPage({ id, onError }: { id: number; onError: (e: unknown) => void }
               <span className="fact">Channel <strong><PlaceName kind="channel" id={play.channelId} /></strong></span>
               <span className="fact">Room <span className="mono">{short(play.roomId, 14)}</span></span>
               <span className="fact">Plex item <span className="mono">{play.ratingKey}</span></span>
+              {sessionLogsHref(play.startedAt, play.endedAt).map((href, n, all) => (
+                <a key={href} className="fact" href={href}>{all.length > 1 ? `Logs, ${n === 0 ? "first" : "second"} UTC day →` : "Logs for this session →"}</a>
+              ))}
               {play.endedAt === null && <button className="link" onClick={reload}>Refresh</button>}
             </div>
             <div className="session-kpis">
@@ -197,6 +202,7 @@ function PlayPage({ id, onError }: { id: number; onError: (e: unknown) => void }
         <div className="session-block">
           <h4>Data sources</h4>
           <SplitBar server={server} cache={cache} peers={peers} />
+          {(data.flow?.length ?? 0) > 1 && <SourcesOverTime flow={data.flow!} />}
         </div>
 
         <div className="session-block">
@@ -233,6 +239,11 @@ function PlayPage({ id, onError }: { id: number; onError: (e: unknown) => void }
         </div>
         <Watched data={data} durationS={i?.durationS ?? null} />
       </section>
+
+      <div className="cards-2">
+        <Pauses events={events} end={play.endedAt ?? Date.now()} />
+        <LoadTimes viewers={viewers} events={events} />
+      </div>
 
       {(data.shares?.length ?? 0) > 0 && (
         <section className="card">
@@ -285,6 +296,8 @@ function SessionViewers({ viewers, events, lead, streams: all, ctx }: {
             const mine = events.filter((e) => e.userId === v.userId);
             const clients = clientsOf(whole, v.userId, v.firstSeen, v.lastSeen);
             const roles = rolesOf(whole, v.userId, v.firstSeen, v.lastSeen);
+            const loads = loadTimes(events, v.userId);
+            const awayMs = awayOf(events, v.userId, v.lastSeen).reduce((s, a) => s + (a.to - a.from), 0);
             // The streams they moved onto; else their own, or the one everyone shared.
             const onto = mine.filter((e) => e.kind === "stream changed" && e.detail?.to).map((e) => e.detail?.to);
             const own = all.filter((s) => s.ownerUserId === v.userId).map((s) => s.variantKey);
@@ -334,6 +347,9 @@ function SessionViewers({ viewers, events, lead, streams: all, ctx }: {
                               {clients.length > 1 && <span className="muted"> · {timeOfDay(c.from)} – {timeOfDay(c.to)}</span>}
                               <span className="client-formats">Plays {c.caps ? formatsText(c.caps, c.av1Encode) : "formats not recorded"}</span></span>
                           ))}</dd>
+                        <dt>Loading at the start</dt><dd>{loadText(loads.start)}</dd>
+                        <dt>Loading after seeks</dt><dd>{loadText(loads.seek)}</dd>
+                        <dt>Away from the Discord window</dt><dd>{awayMs > 0 ? clock(awayMs / 1000) : "Never"}</dd>
                         <dt>Received from the server</dt><dd>{bytes(v.botBytes)}</dd>
                         <dt>Received from Discord's cache</dt><dd>{bytes(Math.min(v.edgeHitBytes, v.httpBytes))}</dd>
                         <dt>Received from other viewers</dt><dd>{bytes(v.p2pBytes)}</dd>
@@ -348,6 +364,91 @@ function SessionViewers({ viewers, events, lead, streams: all, ctx }: {
         </tbody>
       </table>
     </div>
+  );
+}
+
+/** "3 times, 2.1 s on average, 4.0 s at most". */
+function loadText(s: LoadStats | null): string {
+  if (!s) return "None recorded";
+  return s.count === 1 ? `Once, ${(s.avgMs / 1000).toFixed(1)} s` : `${s.count} times, ${(s.avgMs / 1000).toFixed(1)} s on average, ${(s.longestMs / 1000).toFixed(1)} s at most`;
+}
+
+/** What the players had from each source over the session, minute by minute (older sessions have only the bar above). */
+function SourcesOverTime({ flow }: { flow: Array<[number, number, number, number]> }) {
+  // Every minute from the first to the last, a quiet one as nothing: the chart spaces its points evenly.
+  const by = new Map(flow.map((m) => [m[0], m] as const));
+  const points: FlowPoint[] = [];
+  for (let t = flow[0][0]; t <= flow[flow.length - 1][0]; t += 60_000) {
+    const m = by.get(t);
+    // Bytes in a minute, as bits a second.
+    points.push(m ? [t, (m[1] * 8) / 60, (m[2] * 8) / 60, (m[3] * 8) / 60] : [t, 0, 0, 0]);
+  }
+  return (
+    <div className="sources-time">
+      <p className="muted small">Over the session, a minute at a time.</p>
+      <FlowChart points={points} requiredBps={null} stepS={60} height={130}
+        axis={[timeOfDay(points[0][0]), timeOfDay(points[points.length - 1][0])]} label="Data sources over the session" />
+    </div>
+  );
+}
+
+/** Who paused, how often and for how long. */
+function Pauses({ events, end }: { events: PlayEvent[]; end: number }) {
+  const all = pausesOf(events, end);
+  const people = pausesByPerson(all);
+  return (
+    <section className="card">
+      <div className="panel-head">
+        <h3>Pauses</h3>
+        <span className="muted small">{all.length === 0 ? "Playback was never paused." : `${all.length} in all, ${clock(all.reduce((s, p) => s + p.ms, 0) / 1000)} paused.`}</span>
+      </div>
+      {people.length > 0 && (
+        <div className="table-wrap">
+          <table className="table">
+            <thead><tr><th>Who</th><th className="num">Pauses</th><th className="num">Paused for</th><th className="num">Longest</th><th>When</th></tr></thead>
+            <tbody>
+              {people.map((p) => (
+                <tr key={p.userId ?? ""}>
+                  <td>{p.userId ? <Who id={p.userId} name={p.username} /> : "Unknown"}</td>
+                  <td className="num">{p.count}</td>
+                  <td className="num">{clock(p.totalMs / 1000)}</td>
+                  <td className="num">{clock(p.longestMs / 1000)}</td>
+                  <td className="small">{p.pauses.map((x, n) => (
+                    <span key={n} className="pause-at">{timeOfDay(x.at)}{x.posS !== null ? ` at ${clock(x.posS)}` : ""}, {clock(x.ms / 1000)}{x.open ? " (until the end)" : ""}</span>
+                  ))}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
+/** How long each viewer's player took to load at the start and after seeks, and the session's average. */
+function LoadTimes({ viewers, events }: { viewers: PlayViewer[]; events: PlayEvent[] }) {
+  const cell = (s: LoadStats | null) => (s ? <>{(s.avgMs / 1000).toFixed(1)} s<span className="muted"> · {s.count}× · max {(s.longestMs / 1000).toFixed(1)} s</span></> : "—");
+  const session = loadTimes(events, null);
+  return (
+    <section className="card">
+      <div className="panel-head">
+        <h3>Loading times</h3>
+        <span className="muted small">Average time each player took to show the picture.</span>
+      </div>
+      <div className="table-wrap">
+        <table className="table">
+          <thead><tr><th>Viewer</th><th>At the start</th><th>After seeks</th></tr></thead>
+          <tbody>
+            {viewers.map((v) => {
+              const l = loadTimes(events, v.userId);
+              return <tr key={v.userId}><td><Who id={v.userId} name={v.username} /></td><td>{cell(l.start)}</td><td>{cell(l.seek)}</td></tr>;
+            })}
+            <tr className="total-row"><td>Session</td><td>{cell(session.start)}</td><td>{cell(session.seek)}</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
   );
 }
 

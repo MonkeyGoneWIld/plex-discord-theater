@@ -118,6 +118,28 @@ export function cpuUse(from: GpuSample | null, to: GpuSample | null): string {
   return `${Math.round(((to.cpuS - from.cpuS) / ((to.at - from.at) / 1000)) * 10) / 10} cores`;
 }
 
+/**
+ * What a run used from `from` to `to`, as figures: CPU cores, and each GPU
+ * engine's share of its time, busiest first. Null where it can't be told.
+ */
+export function useFigures(from: GpuSample | null, to: GpuSample | null): { cores: number | null; gpu: Array<{ engine: string; share: number }> | null } {
+  if (!from || !to || to.at <= from.at) return { cores: null, gpu: null };
+  const cores = from.cpuS !== null && to.cpuS !== null ? Math.round(((to.cpuS - from.cpuS) / ((to.at - from.at) / 1000)) * 10) / 10 : null;
+  if (to.devices.length === 0) return { cores, gpu: [] };
+  const wallMs = to.at - from.at;
+  const gpu: Array<{ engine: string; share: number }> = [];
+  for (const [engine, c] of Object.entries(to.engines)) {
+    const was = from.engines[engine];
+    const busy = c.busy - (was?.busy ?? 0);
+    const share = c.total !== null
+      ? (was?.total != null && c.total > was.total ? busy / (c.total - was.total) : null)
+      : busy / (wallMs * 1e6);
+    if (share !== null) gpu.push({ engine, share: Math.round(Math.min(1, Math.max(0, share / c.capacity)) * 100) / 100 });
+  }
+  gpu.sort((a, b) => b.share - a.share);
+  return { cores, gpu };
+}
+
 /** Each engine's share of the time from `from` to `to`, busiest first — for the log. */
 export function gpuUse(from: GpuSample | null, to: GpuSample | null): string {
   if (!to) return "unknown (no /proc)";

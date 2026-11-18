@@ -5,6 +5,7 @@ import { bytes, clock, dateTime, zoneLabel } from "./format";
 import { useLoad } from "./parts";
 import { usePlaceNames } from "./names";
 import { ShareList } from "./viz";
+import { clientName } from "./clients";
 import { Bars, byteUnit, ChartCard, COLORS, Columns, count, hours, SeriesTable, type Series } from "./charts";
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -229,8 +230,28 @@ function Upload({ g, rows, per, label }: { g: GraphData; rows: Bucket[]; per: st
   );
 }
 
+/** The three commonest transcode reasons get a colour each; the rest are "Other reasons". */
+function reasonSeries(g: GraphData): { series: Series[]; daily: GraphDay[] } {
+  const top = g.reasons.slice(0, 3).map((r) => r.reason);
+  const key = (reason: string) => { const i = top.indexOf(reason); return i >= 0 ? `r${i}` : "rOther"; };
+  const by = new Map<number, Record<string, number>>();
+  for (const x of g.reasonDays ?? []) {
+    const k = key(x.reason);
+    const day = by.get(x.day) ?? {};
+    day[k] = (day[k] ?? 0) + x.streams;
+    by.set(x.day, day);
+  }
+  const other = (g.reasonDays ?? []).some((x) => key(x.reason) === "rOther");
+  const keys = [...top.map((_, i) => `r${i}`), ...(other ? ["rOther"] : [])];
+  const daily = g.daily.map((d) => ({ ...d, ...Object.fromEntries(keys.map((k) => [k, by.get(d.day)?.[k] ?? 0])) })) as GraphDay[];
+  const series: Series[] = [...top.map((r, i) => ({ key: `r${i}`, label: r, color: COLORS[i] })),
+    ...(other ? [{ key: "rOther", label: "Other reasons", color: "var(--muted)" }] : [])];
+  return { series, daily };
+}
+
 function GraphsBody({ g }: { g: GraphData }) {
-  const { by, rows } = bucketed(g.daily, g.bucket);
+  const reasonsOver = reasonSeries(g);
+  const { by, rows } = bucketed(reasonsOver.daily, g.bucket);
   const per = by === "hour" ? "per hour" : by === "day" ? "per day" : by === "week" ? "per week" : "per month";
   const names = usePlaceNames();
   const t = g.totals;
@@ -306,6 +327,12 @@ function GraphsBody({ g }: { g: GraphData }) {
         <ChartCard title={`Streams ${per}`} sub="Sent unchanged (direct) or transcoded" series={streams} table={table(streams, count)}>
           <Columns rows={chartRows} x="label" series={streams} fmt={count} stacked tipTitle={tipTitle} />
         </ChartCard>
+        {reasonsOver.series.length > 0 && (
+          <ChartCard title={`Transcode reasons ${per}`} sub="Streams transcoded, by why" series={reasonsOver.series}
+            table={table(reasonsOver.series, count)}>
+            <Columns rows={chartRows} x="label" series={reasonsOver.series} fmt={count} stacked tipTitle={tipTitle} />
+          </ChartCard>
+        )}
         <ChartCard title="Transcode reasons" series={one("streams", "Streams")}
           table={<SeriesTable rows={g.reasons} label="Reason" labelKey="reason" series={one("streams", "Streams")} fmt={count} />}>
           {g.reasons.length === 0 ? <p className="muted">No stream was transcoded in this period.</p>
@@ -326,6 +353,13 @@ function GraphsBody({ g }: { g: GraphData }) {
           table={table(one("plays", "Sessions"), count, weekRows, "Day")}>
           <Columns rows={weekRows} x="label" series={one("plays", "Sessions")} fmt={count} tipTitle={tipTitle} />
         </ChartCard>
+        {(g.heat?.length ?? 0) > 0 && (
+          <ChartCard title="Sessions by weekday and hour" sub="Local time; darker is busier" wide
+            table={<TopTable rows={(g.heat ?? []).map((c) => ({ ...c, name: `${WEEKDAYS[c.weekday]}, ${String(c.hour).padStart(2, "0")}:00` }))}
+              cols={[["Sessions", "plays", count], ["Playback", "playedS", hours]]} />}>
+            <Heatmap cells={g.heat ?? []} />
+          </ChartCard>
+        )}
         <ChartCard title="Most watched titles" sub="By combined watch time" series={one("watchedS", "Watch time")}
           table={<TopTable rows={titleRows} cols={[["Sessions", "plays", count], ["Users", "people", count], ["Watch time", "watchedS", hours]]} />}>
           {titleRows.length === 0 ? <p className="muted">No data for this period.</p>
@@ -348,6 +382,8 @@ function GraphsBody({ g }: { g: GraphData }) {
           table={<TopTable rows={pairRows} cols={[["Sent", "bytes", bytes]]} />}>
           <ShareList shares={g.pairs ?? []} empty="No data was shared between viewers in this period." />
         </ChartCard>
+        <ByClient rows={g.clients ?? []} />
+        <ProblemFiles rows={g.problems ?? []} />
         <ChartCard title="Most active servers" sub="Discord servers by combined watch time" series={one("watchedS", "Watch time")}
           table={<TopTable rows={serverRows} cols={[["Sessions", "plays", count], ["Users", "people", count], ["Watch time", "watchedS", hours]]} />}>
           {serverRows.length === 0 ? <p className="muted">No data for this period.</p>
@@ -356,6 +392,125 @@ function GraphsBody({ g }: { g: GraphData }) {
         </ChartCard>
       </div>
     </>
+  );
+}
+
+/** Sessions by weekday (Monday first) and hour: a cell each, shaded by how many. */
+function Heatmap({ cells }: { cells: NonNullable<GraphData["heat"]> }) {
+  const max = Math.max(1, ...cells.map((c) => c.plays));
+  const at = new Map(cells.map((c) => [`${c.weekday}:${c.hour}`, c] as const));
+  return (
+    <div className="heatmap" role="img" aria-label="Sessions by weekday and hour">
+      <div className="heat-grid">
+        <span />
+        {Array.from({ length: 24 }, (_, h) => <span key={h} className="heat-hour">{h % 3 === 0 ? String(h).padStart(2, "0") : ""}</span>)}
+        {[1, 2, 3, 4, 5, 6, 0].map((w) => (
+          <FragmentRow key={w}>
+            <span className="heat-day">{WEEKDAYS[w].slice(0, 3)}</span>
+            {Array.from({ length: 24 }, (_, h) => {
+              const c = at.get(`${w}:${h}`);
+              const share = c ? c.plays / max : 0;
+              return (
+                <span key={h} className={`heat-cell${c ? "" : " none"}`}
+                  style={c ? { background: `color-mix(in oklab, var(--series-1) ${Math.round(20 + share * 80)}%, var(--surface-2))` } : undefined}
+                  title={`${WEEKDAYS[w]}, ${String(h).padStart(2, "0")}:00–${String(h).padStart(2, "0")}:59 · ${c ? `${count(c.plays)} ${c.plays === 1 ? "session" : "sessions"}, ${hours(c.playedS)}` : "no sessions"}`} />
+              );
+            })}
+          </FragmentRow>
+        ))}
+      </div>
+      <div className="heat-key"><span>Fewer</span><span className="heat-ramp" /><span>More ({count(max)})</span></div>
+    </div>
+  );
+}
+
+function FragmentRow({ children }: { children: React.ReactNode }) {
+  return <>{children}</>;
+}
+
+/** Buffering and the streams that had to be transcoded, by the client each viewer finished their session on. */
+function ByClient({ rows }: { rows: NonNullable<GraphData["clients"]> }) {
+  // Clients by name: one Discord app on two versions is one row.
+  const by = new Map<string, { name: string; sessions: number; watchedS: number; stalls: number; stalledMs: number; ownStreams: number; transcoded: number }>();
+  for (const r of rows) {
+    const name = r.device ? clientName(r.device) : "Not recorded";
+    const t = by.get(name) ?? { name, sessions: 0, watchedS: 0, stalls: 0, stalledMs: 0, ownStreams: 0, transcoded: 0 };
+    t.sessions += r.sessions;
+    t.watchedS += r.watchedS;
+    t.stalls += r.stalls;
+    t.stalledMs += r.stalledMs;
+    t.ownStreams += r.ownStreams;
+    t.transcoded += r.transcoded;
+    by.set(name, t);
+  }
+  const list = [...by.values()].sort((a, b) => b.sessions - a.sessions);
+  return (
+    <section className="card chart-card wide">
+      <header className="chart-head">
+        <div>
+          <h3>Buffering and transcodes by client</h3>
+          <p className="muted small chart-sub">Each viewer's session, by the client they finished it on. Own streams are those made for one viewer's player.</p>
+        </div>
+      </header>
+      {list.length === 0 ? <p className="muted">No data for this period.</p> : (
+        <div className="table-wrap">
+          <table className="table">
+            <thead><tr><th>Client</th><th className="num">Sessions</th><th className="num">Watch time</th><th className="num">Buffering</th>
+              <th className="num">Per hour watched</th><th className="num">Own streams</th><th className="num">Transcoded</th></tr></thead>
+            <tbody>
+              {list.map((r) => (
+                <tr key={r.name}>
+                  <td>{r.name}</td>
+                  <td className="num">{count(r.sessions)}</td>
+                  <td className="num nowrap">{hours(r.watchedS)}</td>
+                  <td className="num nowrap">{r.stalls ? `${count(r.stalls)} · ${clock(r.stalledMs / 1000)}` : "None"}</td>
+                  <td className="num">{r.watchedS > 0 ? (r.stalls / (r.watchedS / 3600)).toFixed(1) : "—"}</td>
+                  <td className="num">{count(r.ownStreams)}</td>
+                  <td className={`num${r.transcoded ? " warn-text" : ""}`}>{r.ownStreams ? `${count(r.transcoded)} (${Math.round((r.transcoded / r.ownStreams) * 100)}%)` : "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
+/** Titles whose streams needed a workaround in this period, the latest first. */
+function ProblemFiles({ rows }: { rows: NonNullable<GraphData["problems"]> }) {
+  const n = (v: number) => (v ? count(v) : "—");
+  return (
+    <section className="card chart-card wide">
+      <header className="chart-head">
+        <div>
+          <h3>Titles that needed a workaround</h3>
+          <p className="muted small chart-sub">Sound that stops before the picture (filled with silence), a stream that ends before the length Plex reports,
+            subtitles burned into the picture, and HDR tone-mapped to SDR. Counted by stream or session.</p>
+        </div>
+      </header>
+      {rows.length === 0 ? <p className="muted">No title needed a workaround in this period.</p> : (
+        <div className="table-wrap">
+          <table className="table">
+            <thead><tr><th>Title</th><th className="num">Short sound</th><th className="num">Ended early</th><th className="num">Subtitles burned in</th>
+              <th className="num">Tone-mapped</th><th className="num">Sessions</th><th>Last</th></tr></thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.ratingKey}>
+                  <td>{r.title ?? `Plex item ${r.ratingKey}`} <span className="mono muted small">{r.ratingKey}</span></td>
+                  <td className="num">{n(r.shortSound)}</td>
+                  <td className="num">{n(r.earlyEnd)}</td>
+                  <td className="num">{n(r.burned)}</td>
+                  <td className="num">{n(r.toneMapped)}</td>
+                  <td className="num">{count(r.sessions)}</td>
+                  <td className="nowrap">{r.lastPlayId ? <a href={`#history/${r.lastPlayId}`}>{dateTime(r.lastAt)}</a> : dateTime(r.lastAt)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
   );
 }
 

@@ -3,7 +3,7 @@ import path from "node:path";
 import Database from "better-sqlite3";
 import { overview, type ClientView, type Overview, type RoomView, type StreamView, type ViewerData } from "./data.js";
 import { instanceHosts } from "../routes/discord.js";
-import type { ClientLogEntry, ClientLogEvent, PlaceEvent, RequestEvent, SentEvent, TransportEvent } from "../services/admin-hooks.js";
+import type { ClientLogEntry, ClientLogEvent, HostRequestEvent, PlaceEvent, RequestEvent, SentEvent, StreamIssueEvent, TransportEvent } from "../services/admin-hooks.js";
 import { zoneClock } from "./zone.js";
 
 /**
@@ -49,6 +49,8 @@ const SEEK_LOAD_AFTER_MS = 3_000;
 const HOST_MOVE_MS = 15_000;
 /** How long after the room notes how its host or a co-host changed a change seen is put down to it. */
 const ROLE_WHY_MS = 10_000;
+/** How long a workaround said before its title's play opened waits for it. */
+const ISSUE_WAIT_MS = 30_000;
 /** What a viewer had been doing in the room before a session: what their client and role were as it opened. */
 const LEAD_KINDS = ["joined", "came back", "switched client", "role", "left"];
 /** Players whose key is remembered, for who sent whom what: the most recent kept. */
@@ -62,6 +64,10 @@ const HOUR_MS = 3_600_000;
 const HOURLY_UP_TO_MS = 72 * HOUR_MS;
 /** A player not heard from in this long is forgotten. */
 const PLAYER_FORGET_MS = 10 * 60_000;
+/** How much of each player's drift and buffer is kept for Now Playing's charts. */
+export const HEALTH_KEEP_MS = 10 * 60_000;
+/** Drift past which a player corrects itself (client Player.tsx DRIFT_THRESHOLD_S): out of sync. */
+export const OUT_OF_SYNC_S = 2;
 
 type Instance = { hostUserId: string; guildId: string | null; channelId: string | null; createdAt: number };
 
@@ -127,6 +133,8 @@ interface OpenPlay {
   reachedEnd: boolean;
   /** What each viewer's player sent another's, by "from|to": for Now Playing. */
   shares: Map<string, number>;
+  /** The workarounds its streams needed, said once a play each. */
+  issues: Set<string>;
 }
 
 /** Everything a play's players have had by one moment, by where it came from. */
@@ -223,6 +231,11 @@ interface PlayerState {
   /** Whether the picture has moved on this page: a stop before it does is the start loading. */
   played: boolean;
   lastAt: number;
+  /** Its last Health sample's distance from the room (null for the host's) and what it has downloaded ahead, seconds. */
+  driftS: number | null;
+  aheadS: number | null;
+  /** Those over the last HEALTH_KEEP_MS: [time, drift, ahead]. */
+  health: Array<[number, number | null, number | null]>;
 }
 
 /** What a viewer's player is doing, as the Now Playing page shows it. */
@@ -230,6 +243,11 @@ export interface PlayerNow {
   /** Stopped for want of data, loading the start or a stream, or loading after a seek; null when it isn't. */
   stall: "buffering" | "start" | "seek" | null;
   sinceMs: number | null;
+  /** Its last sample: how far from the room it is (null for the host), and how much it has downloaded ahead, seconds. */
+  driftS?: number | null;
+  aheadS?: number | null;
+  /** Those over the last minutes: [time, drift, ahead]. */
+  health?: Array<[number, number | null, number | null]>;
 }
 
 export interface PlaySummary {
@@ -333,6 +351,7 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS events_play ON events(play_id, at);
 CREATE INDEX IF NOT EXISTS events_room_user ON events(room_id, user_id, at);
+CREATE INDEX IF NOT EXISTS events_user ON events(user_id, at);
 CREATE TABLE IF NOT EXISTS usage (
   id INTEGER PRIMARY KEY,
   at INTEGER NOT NULL,
@@ -386,6 +405,16 @@ CREATE TABLE IF NOT EXISTS traffic (
   viewers INTEGER NOT NULL DEFAULT 0,
   streams INTEGER NOT NULL DEFAULT 0,
   feed_kbps INTEGER NOT NULL DEFAULT 0
+);
+-- Each minute of a play: what its players had from the bot (bot), from
+-- Discord's cache (hit) and from each other (p2p).
+CREATE TABLE IF NOT EXISTS play_flow (
+  play_id INTEGER NOT NULL,
+  minute INTEGER NOT NULL,
+  bot_bytes INTEGER NOT NULL DEFAULT 0,
+  hit_bytes INTEGER NOT NULL DEFAULT 0,
+  p2p_bytes INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (play_id, minute)
 );
 -- What one viewer's player sent another's in a play.
 CREATE TABLE IF NOT EXISTS play_shares (
@@ -447,6 +476,8 @@ export class Recorder {
   private readonly launched = new Set<string>();
   /** Whose each player is, by the key its peer id starts with: for who sent whom what. */
   private readonly peerKeys = new Map<string, string>();
+  /** Workarounds said of a title before its play opened (streamIssue). */
+  private pendingIssues: StreamIssueEvent[] = [];
   private timer: NodeJS.Timeout | null = null;
   private closed = false;
 
@@ -835,8 +866,12 @@ export class Recorder {
     const play: OpenPlay = {
       id, ratingKey, events: 0, errorEvents: 0, playedS: 0, peak: 0, lastTick: at, startedAt: at, playAt: 0, seekAt: 0,
       posAt: 0, posPlaying: null, streams: new Map(), viewers: new Map(), flow: [], reachedEnd: false, shares: new Map(),
+      issues: new Set(),
     };
     this.open.set(roomId, play);
+    const waiting = this.pendingIssues.filter((x) => x.ratingKey === ratingKey && at - x.at < ISSUE_WAIT_MS);
+    this.pendingIssues = this.pendingIssues.filter((x) => !waiting.includes(x) && at - x.at < ISSUE_WAIT_MS);
+    for (const x of waiting) this.writeIssue(play, roomId, x);
     return play;
   }
 
@@ -891,7 +926,7 @@ export class Recorder {
   }
 
   /** One line of a play's (or, with none, a room's) history. Its id, or null if it wasn't kept. */
-  private event(play: OpenPlay | null, roomId: string, at: number, kind: string, userId: string | null,
+  private event(play: OpenPlay | null, roomId: string | null, at: number, kind: string, userId: string | null,
     username: string | null, posS: number | null, detail: unknown): number | null {
     if (play) {
       if (play.events >= MAX_EVENTS_PER_PLAY) return null;
@@ -996,7 +1031,7 @@ export class Recorder {
     let p = this.players.get(key);
     if (!p) {
       p = { session: "", p2p: 0, http: 0, edge: 0, edgeHit: 0, up: 0, upTo: new Map(), upCredited: new Map(), sampled: false,
-        waitingSince: null, waitingAfterSeek: false, waitingReady: null, played: false, lastAt: t };
+        waitingSince: null, waitingAfterSeek: false, waitingReady: null, played: false, lastAt: t, driftS: null, aheadS: null, health: [] };
       this.players.set(key, p);
     }
     p.lastAt = t;
@@ -1057,6 +1092,12 @@ export class Recorder {
     if (baseline) p.upCredited = new Map(upTo);
     const paused = d.paused === true || d.paused === "true";
     if (!paused && num(d.playedS) > 0) p.played = true;
+    const drift = num(d.driftS);
+    const ahead = num(d.downloadedAheadS);
+    p.driftS = Number.isFinite(drift) ? Math.round(drift * 100) / 100 : null;
+    p.aheadS = Number.isFinite(ahead) ? Math.round(ahead * 10) / 10 : null;
+    p.health.push([entry.t, p.driftS, p.aheadS]);
+    while (p.health.length > 1 && p.health[0][0] < entry.t - HEALTH_KEEP_MS) p.health.shift();
     const now = this.viewerNow(userId);
     if (!now) return;
     now.v.httpBytes += Math.max(0, delta.http);
@@ -1068,7 +1109,13 @@ export class Recorder {
     this.shares(now.play, userId, p);
     const got = Math.max(0, delta.http);
     const hit = Math.min(got, Math.max(0, delta.edgeHit));
-    if (got || delta.p2p > 0) this.traffic(entry.t, { bot: got - hit, hit, p2p: Math.max(0, delta.p2p) });
+    if (got || delta.p2p > 0) {
+      this.traffic(entry.t, { bot: got - hit, hit, p2p: Math.max(0, delta.p2p) });
+      this.st(`INSERT INTO play_flow (play_id, minute, bot_bytes, hit_bytes, p2p_bytes) VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT (play_id, minute) DO UPDATE SET bot_bytes = bot_bytes + excluded.bot_bytes,
+                 hit_bytes = hit_bytes + excluded.hit_bytes, p2p_bytes = p2p_bytes + excluded.p2p_bytes`)
+        .run(now.play.id, Math.floor(entry.t / 60_000), Math.round(got - hit), Math.round(hit), Math.round(Math.max(0, delta.p2p)));
+    }
     this.position(now.play, userId, entry.t, num(d.posS), !paused);
   }
 
@@ -1156,8 +1203,9 @@ export class Recorder {
     let p: PlayerState | null = null;
     for (const [key, s] of this.players) if (key.startsWith(`${userId}|`) && (!p || s.lastAt > p.lastAt)) p = s;
     if (!p || at - p.lastAt > PLAYER_QUIET_MS) return null;
-    if (p.waitingSince === null || !play) return { stall: null, sinceMs: null };
-    return { stall: this.stallKind(p, p.waitingSince, userId, play), sinceMs: Math.max(0, at - p.waitingSince) };
+    const health = { driftS: p.driftS, aheadS: p.aheadS, health: p.health.filter(([t]) => t >= at - HEALTH_KEEP_MS) };
+    if (p.waitingSince === null || !play) return { stall: null, sinceMs: null, ...health };
+    return { stall: this.stallKind(p, p.waitingSince, userId, play), sinceMs: Math.max(0, at - p.waitingSince), ...health };
   }
 
   /** A Discord server's name, from the sign-in that saw it. */
@@ -1204,6 +1252,55 @@ export class Recorder {
     const posS = num(entry.data.posS);
     this.event(now.play, now.roomId, entry.t, "player error", userId, this.nameOf(userId),
       Number.isFinite(posS) ? posS : null, { tag: entry.tag, msg: entry.msg });
+  }
+
+  /**
+   * A request for the host role that came to nothing of its own: asked,
+   * declined, or ended with who asked gone or the role moved. One accepted
+   * or passed on is the role change after it.
+   */
+  hostRequest(e: HostRequestEvent): void {
+    if (this.closed) return;
+    const play = this.open.get(e.roomId) ?? null;
+    const kind = e.outcome === "asked" ? "asked for host" : e.outcome === "declined" ? "request declined" : "request ended";
+    const detail = {
+      ...(e.hostName || e.hostId ? { host: e.hostName ?? (e.hostId ? this.nameOf(e.hostId) : null) ?? e.hostId } : {}),
+      ...(e.away ? { away: true } : {}),
+      ...(e.waitS !== undefined ? { waitS: e.waitS } : {}),
+      ...(e.why ? { why: e.why } : {}),
+    };
+    this.remember(e.userId, e.username, e.at);
+    this.event(play, e.roomId, e.at, kind, e.userId, e.username ?? this.nameOf(e.userId), play ? this.roomPos(e.roomId) : null, detail);
+  }
+
+  /** Where a room was at the last look. */
+  private roomPos(roomId: string): number | null {
+    const play = this.open.get(roomId);
+    if (!play) return null;
+    const r = this.st("SELECT last_pos_s AS p FROM plays WHERE id = ?").get(play.id) as { p: number | null } | undefined;
+    return r?.p ?? null;
+  }
+
+  /**
+   * A workaround a title's stream needed: written once a play, to the play
+   * on that stream or title. One planned before the room's play opens waits
+   * for it, a little (pendingIssues).
+   */
+  streamIssue(e: StreamIssueEvent): void {
+    if (this.closed) return;
+    const found = [...this.open].find(([, p]) => p.streams.has(e.hlsSessionId))
+      ?? [...this.open].find(([, p]) => p.ratingKey === e.ratingKey) ?? null;
+    if (!found) {
+      this.pendingIssues = [...this.pendingIssues.filter((x) => e.at - x.at < ISSUE_WAIT_MS), e];
+      return;
+    }
+    this.writeIssue(found[1], found[0], e);
+  }
+
+  private writeIssue(play: OpenPlay, roomId: string, e: StreamIssueEvent): void {
+    if (play.issues.has(e.kind)) return;
+    play.issues.add(e.kind);
+    this.event(play, roomId, e.at, e.kind, null, null, null, { ratingKey: e.ratingKey, session: e.hlsSessionId.slice(0, 8), ...e.detail });
   }
 
   /** A title asked for through Seerr. */
@@ -1352,7 +1449,12 @@ export class Recorder {
     const shares = (this.st("SELECT from_user, to_user, bytes FROM play_shares WHERE play_id = ? AND bytes > 0 ORDER BY bytes DESC")
       .all(id) as Array<{ from_user: string; to_user: string; bytes: number }>)
       .map((s) => ({ from: s.from_user, to: s.to_user, bytes: Number(s.bytes) }));
-    return { play, viewers, streams, events, lead, track, watched, shares };
+    // What its players had from each source, minute by minute: [minute's start, server, Discord's cache, other viewers].
+    const flow = (this.st("SELECT minute, bot_bytes, hit_bytes, p2p_bytes FROM play_flow WHERE play_id = ? ORDER BY minute").all(id) as
+      Array<{ minute: number; bot_bytes: number; hit_bytes: number; p2p_bytes: number }>)
+      .map((m): [number, number, number, number] => [m.minute * 60_000, Number(m.bot_bytes), Number(m.hit_bytes), Number(m.p2p_bytes)]);
+    const positions = Object.fromEntries(byViewer);
+    return { play, viewers, streams, events, lead, track, watched, shares, flow, positions };
   }
 
   usage(opts: { limit?: unknown; before?: unknown } = {}) {
@@ -1430,8 +1532,46 @@ export class Recorder {
           SUM(s.bytes) AS bytes, COUNT(DISTINCT s.play_id) AS plays
         FROM play_shares s WHERE s.${dir} = ? GROUP BY s.${other} ORDER BY bytes DESC LIMIT 20`).all(userId) as Array<Record<string, unknown>>)
         .map((r) => ({ userId: String(r.id), username: (r.name as string | null) ?? null, bytes: Number(r.bytes), plays: Number(r.plays) }));
+    // Every client they have been seen on, with what its player plays, and
+    // how long they were host, co-host and viewer in their sessions.
+    const seen = (this.st(`SELECT at, kind, room_id, play_id, detail FROM events WHERE user_id = ?
+        AND kind IN (${LEAD_KINDS.map(() => "?").join(", ")}) ORDER BY at, id`).all(userId, ...LEAD_KINDS) as Array<Record<string, unknown>>)
+      .map((e) => ({ at: Number(e.at), kind: String(e.kind), roomId: (e.room_id as string | null) ?? null,
+        playId: (e.play_id as number | null) ?? null, detail: (parse(e.detail) ?? {}) as Record<string, unknown> }));
+    const clients = new Map<string, { device: string; caps: string[] | null; av1Encode: boolean; first: number; last: number; plays: Set<number> }>();
+    const deviceOf = (e: (typeof seen)[number]) => {
+      const d = e.kind === "switched client" ? e.detail.to : e.kind === "joined" || e.kind === "came back" ? e.detail.device : null;
+      return typeof d === "string" && d ? d : null;
+    };
+    for (const e of seen) {
+      const device = deviceOf(e);
+      if (!device) continue;
+      let c = clients.get(device);
+      if (!c) clients.set(device, (c = { device, caps: null, av1Encode: false, first: e.at, last: e.at, plays: new Set() }));
+      c.last = e.at;
+      if (Array.isArray(e.detail.caps)) {
+        c.caps = e.detail.caps.filter((x): x is string => typeof x === "string");
+        c.av1Encode = e.detail.av1Encode === true;
+      }
+    }
+    // A client's sessions: those it was in use for, from the one it had as
+    // the session opened (a host joins before choosing the title) to any it
+    // moved to during it.
+    for (const p of plays) {
+      const here = seen.filter((e) => e.roomId === p.roomId && e.at <= p.lastSeen && deviceOf(e));
+      const before = [...here].reverse().find((e) => e.at <= p.firstSeen);
+      for (const e of [...(before ? [before] : []), ...here.filter((x) => x.at > p.firstSeen)]) clients.get(deviceOf(e)!)?.plays.add(p.id);
+    }
+    const roles = { host: 0, "co-host": 0, viewer: 0 };
+    for (const p of plays) {
+      const t = roleTime(seen.filter((e) => e.roomId === p.roomId), p.firstSeen, p.lastSeen);
+      for (const k of Object.keys(roles) as Array<keyof typeof roles>) roles[k] += t[k];
+    }
     return { person: personOf(row), plays, requests: this.requests({ userId, limit: 500 }), places,
-      sentTo: pairs("from_user", "to_user"), gotFrom: pairs("to_user", "from_user") };
+      sentTo: pairs("from_user", "to_user"), gotFrom: pairs("to_user", "from_user"),
+      clients: [...clients.values()].sort((a, b) => b.last - a.last)
+        .map(({ plays: ps, ...c }) => ({ ...c, sessions: ps.size })),
+      roleS: { host: Math.round(roles.host), coHost: Math.round(roles["co-host"]), viewer: Math.round(roles.viewer) } };
   }
 
   /** Every Discord server the Activity was used in, and each of its channels. */
@@ -1750,8 +1890,64 @@ export class Recorder {
       WHERE decision = 'transcode' AND started_at >= @from AND started_at < @to GROUP BY 1 ORDER BY n DESC, reason LIMIT 8`)
       .map((r) => ({ reason: String(r.reason), streams: int(r.n) }));
 
+    // Each transcode reason, bucket by bucket: [bucket, reason, streams].
+    const reasonDays = rows(`SELECT ${DAY} AS d, COALESCE(reason, 'No reason given') AS reason, COUNT(*) AS n FROM play_streams
+      WHERE decision = 'transcode' AND started_at >= @from AND started_at < @to GROUP BY d, 2`)
+      .map((r) => ({ day: int(r.d) * size, reason: String(r.reason), streams: int(r.n) }));
+    // Sessions by weekday and hour together, local time.
+    const heat = rows(`SELECT (CAST(${local("started_at")} / 86400000 AS INTEGER) + 4) % 7 AS w,
+        CAST(${local("started_at")} / 3600000 AS INTEGER) % 24 AS h, COUNT(*) AS plays, COALESCE(SUM(played_s), 0) AS played
+      FROM plays WHERE started_at >= @from AND started_at < @to GROUP BY w, h`)
+      .map((r) => ({ weekday: int(r.w), hour: int(r.h), plays: int(r.plays), playedS: Math.round(int(r.played)) }));
+    // Each viewer's session by the client they finished it on: their buffering,
+    // and the streams of their own that had to be transcoded for it.
+    const clients = rows(`SELECT device, COUNT(*) AS sessions, COUNT(DISTINCT user_id) AS people, SUM(watched) AS watched,
+        SUM(stalls) AS stalls, SUM(stalled) AS stalled, SUM(own) AS own, SUM(transcoded) AS transcoded FROM (
+        SELECT v.user_id, v.watched_s AS watched, v.stalls, v.stalled_ms AS stalled,
+          (SELECT COALESCE(json_extract(e.detail, '$.to'), json_extract(e.detail, '$.device')) FROM events e
+            WHERE e.room_id = p.room_id AND e.user_id = v.user_id AND e.at <= v.last_seen
+            AND e.kind IN ('joined', 'came back', 'switched client') ORDER BY e.at DESC LIMIT 1) AS device,
+          (SELECT COUNT(*) FROM play_streams s WHERE s.play_id = v.play_id AND s.owner_user_id = v.user_id) AS own,
+          (SELECT COUNT(*) FROM play_streams s WHERE s.play_id = v.play_id AND s.owner_user_id = v.user_id AND s.decision = 'transcode') AS transcoded
+        FROM play_viewers v JOIN plays p ON p.id = v.play_id WHERE p.started_at >= @from AND p.started_at < @to)
+      GROUP BY device ORDER BY sessions DESC LIMIT 60`)
+      .map((r) => ({ device: (r.device as string | null) ?? null, sessions: int(r.sessions), people: int(r.people),
+        watchedS: Math.round(int(r.watched)), stalls: int(r.stalls), stalledMs: int(r.stalled),
+        ownStreams: int(r.own), transcoded: int(r.transcoded) }));
+    // Titles whose streams needed a workaround: sound that stops before the
+    // picture, an end before the file's, subtitles burned in, HDR tone-mapped.
+    const problems = new Map<string, { ratingKey: string; title: string | null; shortSound: number; earlyEnd: number; burned: number;
+      toneMapped: number; plays: Set<number>; lastAt: number; lastPlayId: number | null }>();
+    const problem = (k: string, title: string | null, playId: number | null, at: number) => {
+      let p = problems.get(k);
+      if (!p) problems.set(k, (p = { ratingKey: k, title, shortSound: 0, earlyEnd: 0, burned: 0, toneMapped: 0, plays: new Set(), lastAt: 0, lastPlayId: null }));
+      p.title ??= title;
+      if (playId !== null) p.plays.add(playId);
+      if (at >= p.lastAt) Object.assign(p, { lastAt: at, lastPlayId: playId ?? p.lastPlayId });
+      return p;
+    };
+    for (const r of rows(`SELECT e.kind, e.at, e.play_id AS pid, COALESCE(p.rating_key, json_extract(e.detail, '$.ratingKey')) AS k, p.title,
+        json_extract(e.detail, '$.early') AS early FROM events e LEFT JOIN plays p ON p.id = e.play_id
+      WHERE e.at >= @from AND e.at < @to AND (e.kind = 'short sound' OR e.kind = 'reached the end')`)) {
+      if (!r.k || (r.kind === "reached the end" && !r.early)) continue;
+      const p = problem(String(r.k), (r.title as string | null) ?? null, (r.pid as number | null) ?? null, int(r.at));
+      if (r.kind === "short sound") p.shortSound++;
+      else p.earlyEnd++;
+    }
+    for (const r of rows(`SELECT s.play_id AS pid, s.started_at AS at, p.rating_key AS k, p.title,
+        (s.decision = 'transcode' AND (s.reason LIKE '%burn%' OR s.reason LIKE '%subtitle%')) AS burned,
+        (json_extract(s.notes, '$.range') LIKE '%tone-mapped%') AS toned
+      FROM play_streams s JOIN plays p ON p.id = s.play_id WHERE s.started_at >= @from AND s.started_at < @to`)) {
+      if (!int(r.burned) && !int(r.toned)) continue;
+      const p = problem(String(r.k), (r.title as string | null) ?? null, int(r.pid), int(r.at));
+      if (int(r.burned)) p.burned++;
+      if (int(r.toned)) p.toneMapped++;
+    }
+    const problemTitles = [...problems.values()].sort((a, b) => b.lastAt - a.lastAt).slice(0, 50)
+      .map(({ plays: ps, ...p }) => ({ ...p, sessions: ps.size }));
+
     return { days, lastHours, bucket, zone: zone.zone, from, to, totals, daily, hours, weekdays, titles,
-      people: topPeople, sharers, pairs, servers, reasons, upload };
+      people: topPeople, sharers, pairs, servers, reasons, upload, reasonDays, heat, clients, problems: problemTitles };
   }
 
   /** The history file: how big it is, what it holds, and from when. */
@@ -1809,6 +2005,7 @@ export class Recorder {
       this.st(`DELETE FROM events WHERE id IN (SELECT e.id FROM events e WHERE ${OLD_EVENT})`).run({ before });
       this.st(`DELETE FROM play_viewers WHERE play_id IN (SELECT p.id FROM plays p WHERE ${OLD_PLAY})`).run({ before });
       this.st(`DELETE FROM positions WHERE play_id IN (SELECT p.id FROM plays p WHERE ${OLD_PLAY})`).run({ before });
+      this.st(`DELETE FROM play_flow WHERE play_id IN (SELECT p.id FROM plays p WHERE ${OLD_PLAY})`).run({ before });
       this.st("DELETE FROM traffic WHERE minute < @minute").run({ minute: Math.floor(before / 60_000) });
       this.st(`DELETE FROM play_streams WHERE play_id IN (SELECT p.id FROM plays p WHERE ${OLD_PLAY})`).run({ before });
       this.st(`DELETE FROM plays WHERE id IN (SELECT p.id FROM plays p WHERE ${OLD_PLAY})`).run({ before });
@@ -1889,6 +2086,16 @@ export interface UploadRates {
 }
 
 export interface Graphs {
+  /** Each transcode reason, bucket by bucket (the bucket's start, as GraphDay.day). */
+  reasonDays: Array<{ day: number; reason: string; streams: number }>;
+  /** Sessions by weekday (Sunday 0) and hour together, local time. */
+  heat: Array<{ weekday: number; hour: number; plays: number; playedS: number }>;
+  /** Viewers' sessions by the client they finished on (its user agent). */
+  clients: Array<{ device: string | null; sessions: number; people: number; watchedS: number; stalls: number; stalledMs: number;
+    ownStreams: number; transcoded: number }>;
+  /** Titles whose streams needed a workaround, most recent first. */
+  problems: Array<{ ratingKey: string; title: string | null; shortSound: number; earlyEnd: number; burned: number; toneMapped: number;
+    sessions: number; lastAt: number; lastPlayId: number | null }>;
   /** The days it covers, or 0 for all time; and the hours it was asked for, if it was. */
   days: number;
   lastHours: number | null;
@@ -2082,6 +2289,33 @@ function cleanName(v: unknown): string | null {
   if (typeof v !== "string") return null;
   const s = v.replace(/[\u0000-\u001f\u007f]+/g, " ").trim().slice(0, 100);
   return s || null;
+}
+
+/**
+ * Seconds as host, co-host and viewer between `from` and `to`, from one
+ * person's joins, client switches, role changes and leaving in one room
+ * (oldest first, those before `from` included for the role they came in with).
+ */
+export function roleTime(events: Array<{ at: number; kind: string; detail: Record<string, unknown> }>, from: number, to: number):
+  Record<"host" | "co-host" | "viewer", number> {
+  const out = { host: 0, "co-host": 0, viewer: 0 };
+  let role: keyof typeof out | null = null;
+  let since = from;
+  const close = (t: number) => {
+    const a = Math.max(since, from);
+    const b = Math.min(t, to);
+    if (role && b > a) out[role] += (b - a) / 1000;
+  };
+  for (const e of events) {
+    if (e.at > to) break;
+    const next = e.kind === "left" ? null : e.kind === "role" ? e.detail.to : e.detail.role;
+    if (next !== null && !(typeof next === "string" && next in out)) continue;
+    close(e.at);
+    role = next as keyof typeof out | null;
+    since = e.at;
+  }
+  close(to);
+  return out;
 }
 
 /**

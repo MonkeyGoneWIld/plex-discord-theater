@@ -23,6 +23,7 @@ import {
 import { isTvdbConfigured, tvdbSeasonEpisodes } from "../services/tvdb.js";
 import * as thumbCache from "../services/thumb-cache.js";
 import { logEvent } from "../services/logger.js";
+import { adminHooks } from "../services/admin-hooks.js";
 import { fileKeyframes } from "../services/keyframes.js";
 import { sessionHostUserId, sessionHasOtherWatchers, mayStart, mayStartTranscode, roomPositionForSession, streamsDrivenBy } from "../services/sync.js";
 import { getSessionUserId } from "../middleware/auth.js";
@@ -5401,10 +5402,12 @@ async function startWithFfmpeg(o: {
     const found = await probed;
     const to = soundPadTo(found, audio.index);
     if (to !== null) {
+      const soundEndsS = found?.streams.find((s) => s.index === audio.index)?.durationS ?? null;
       logEvent("FFmpeg", "the sound stops before the picture: read on its own, and silent from there to the end", {
-        session, ratingKey: o.ratingKey, soundEndsS: found?.streams.find((s) => s.index === audio.index)?.durationS?.toFixed(2),
-        pictureEndsS: to.toFixed(2),
+        session, ratingKey: o.ratingKey, soundEndsS: soundEndsS?.toFixed(2), pictureEndsS: to.toFixed(2),
       });
+      adminHooks.streamIssue({ at: Date.now(), hlsSessionId: o.sessionId, ratingKey: o.ratingKey, kind: "short sound",
+        detail: { ...(soundEndsS !== null ? { soundEndsS: Math.round(soundEndsS * 100) / 100 } : {}), pictureEndsS: Math.round(to * 100) / 100 } });
     }
     return to;
   };

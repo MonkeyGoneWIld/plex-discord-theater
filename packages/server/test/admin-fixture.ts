@@ -149,27 +149,37 @@ await join(idle, "300000000000000001", "lurker", AGENTS.edge);
 // the bot, some from Discord's cache, some from other viewers.
 const viewers = ["100000000000000001", "402115789012345678", "402115789012345679", "402115789012345680", "200000000000000001", "200000000000000002"];
 let sampled = 0;
+// How far each player is from the room, and what it has downloaded ahead: robin's
+// re-encode drifts and runs low now and then; the film's players are paused.
+const driftOf = (i: number, k: number) => (i === 0 || i === 4 ? "n/a(host)" : i === 3 ? Math.sin(k / 3) * 2.8 : Math.sin(k + i) * 0.4);
+const aheadOf = (i: number, k: number) => (i === 3 ? 4 + Math.abs(Math.sin(k / 2)) * 16 : i >= 4 ? 60 : 28 + Math.sin(k + i) * 6);
 // Each player's key, as its peer id carries it, and whom it sends: the
 // episode's host and third viewer send the other two, the film's host its viewer.
 const keyOf = (id: string) => `K${id.slice(0, 1)}${id.slice(-6)}`;
 const SENDS: Record<number, Array<[number, number]>> = { 0: [[1, 0.6], [3, 0.5]], 2: [[1, 0.4], [3, 0.5]], 4: [[5, 1]] };
 const feed = () => {
-  sampled++;
+  // The first time, the last two minutes' worth: the sync and buffer charts have something to draw at once.
+  const first = sampled === 0;
+  const ks = first ? Array.from({ length: 12 }, (_, j) => j + 1) : [sampled + 1];
+  sampled = ks[ks.length - 1];
+  const now = Date.now();
   viewers.forEach((userId, i) => {
-    const mb = sampled * (3 + i);
-    const upTo = Object.fromEntries((SENDS[i] ?? []).map(([to, share]) => [keyOf(viewers[to]), (sampled * (3 + to)) / 3 * share]));
-    const upMB = Object.values(upTo).reduce((a, b) => a + b, 0);
-    recorder.clientLog({ at: Date.now(), userId, clientId: `fixture${i}`, entries: [{
-      t: Date.now(), level: "LOG", tag: "Health", msg: "sample",
-      data: { session: "fixture", httpMB: mb, p2pMB: i % 2 ? mb / 3 : 0, edgeHitMB: (mb * 0.4).toFixed(1), edgeMB: (mb * 0.9).toFixed(1),
-        peerKey: keyOf(userId), ...(upMB > 0 ? { upMB, upTo } : {}),
-        // Where each player is: the episode playing from 312 s, the film paused at 4210 s.
-        ...(i < 4 ? { posS: 312 + sampled * 10, paused: false, playedS: 10 } : { posS: 4210, paused: true, playedS: 0 }) },
-    }] });
+    recorder.clientLog({ at: now, userId, clientId: `fixture${i}`, entries: ks.map((k) => {
+      const mb = k * (3 + i);
+      const upTo = Object.fromEntries((SENDS[i] ?? []).map(([to, share]) => [keyOf(viewers[to]), (k * (3 + to)) / 3 * share]));
+      const upMB = Object.values(upTo).reduce((a, b) => a + b, 0);
+      return {
+        t: now - (sampled - k) * 10_000, level: "LOG", tag: "Health", msg: "sample",
+        data: { session: "fixture", httpMB: mb, p2pMB: i % 2 ? mb / 3 : 0, edgeHitMB: (mb * 0.4).toFixed(1), edgeMB: (mb * 0.9).toFixed(1),
+          peerKey: keyOf(userId), ...(upMB > 0 ? { upMB, upTo } : {}), driftS: driftOf(i, k), downloadedAheadS: aheadOf(i, k),
+          // Where each player is: the episode playing from 312 s, the film paused at 4210 s.
+          ...(i < 4 ? { posS: 312 + k * 10, paused: false, playedS: 10 } : { posS: 4210, paused: true, playedS: 0 }) },
+      };
+    }) });
   });
   // What the bot's port sent in those ten seconds: about the two streams' worth.
   recorder.sent({ at: Date.now(), bytes: 11_500_000 + (sampled % 3) * 1_000_000 });
-  if (sampled === 3) {
+  if (sampled === 13) {
     const t = Date.now();
     recorder.clientLog({ at: t, userId: "402115789012345680", clientId: "fixture3", entries: [
       { t: t - 4_000, level: "WARN", tag: "Video", msg: "waiting (buffer starved)", data: { posS: 340, paused: false, seeking: false } },

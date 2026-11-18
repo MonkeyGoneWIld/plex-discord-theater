@@ -86,8 +86,42 @@ export interface SentEvent {
   bytes: number;
 }
 
+/**
+ * A request for the host role that came to nothing of its own: asked, declined
+ * by the host, or ended because who asked left or the role moved. One
+ * accepted, or passed on unanswered, is a change of host (sync.ts RoleWhy).
+ */
+export interface HostRequestEvent {
+  at: number;
+  roomId: string;
+  outcome: "asked" | "declined" | "ended";
+  userId: string;
+  username: string | null;
+  hostId: string | null;
+  hostName: string | null;
+  /** Asked: whether the host was away from the Discord window, and how long they have to answer. */
+  away?: boolean;
+  waitS?: number;
+  /** Ended: who asked left, or the host role moved first. */
+  why?: "asker left" | "host changed";
+}
+
+/**
+ * Something a title's stream needed to work around (routes/plex.ts): its sound
+ * stopping before its picture.
+ */
+export interface StreamIssueEvent {
+  at: number;
+  hlsSessionId: string;
+  ratingKey: string;
+  kind: "short sound";
+  detail: Record<string, unknown>;
+}
+
 export interface AdminHooks {
   transport(e: TransportEvent): void;
+  hostRequest(e: HostRequestEvent): void;
+  streamIssue(e: StreamIssueEvent): void;
   clientLog(e: ClientLogEvent): void;
   request(e: RequestEvent): void;
   place(e: PlaceEvent): void;
@@ -117,6 +151,8 @@ export const adminHooks = {
     return current !== null;
   },
   transport: (e: TransportEvent) => call("transport", e),
+  hostRequest: (e: HostRequestEvent) => call("hostRequest", e),
+  streamIssue: (e: StreamIssueEvent) => call("streamIssue", e),
   clientLog: (e: ClientLogEvent) => call("clientLog", e),
   request: (e: RequestEvent) => call("request", e),
   place: (e: PlaceEvent) => call("place", e),

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { exportUrl } from "./api";
 import type { Notes, ViewerData } from "./types";
-import { bytes, clock, rate, short } from "./format";
+import { bytes, clock, duration, rate, short } from "./format";
 import { Icon } from "./icons";
 import { usePlaceNames } from "./names";
 import { SplitBar } from "./viz";
@@ -63,7 +63,7 @@ export function DecisionBadge({ s }: { s: { decision: string | null; notes: Note
 /** Why a stream is the way it is, in one sentence. */
 export function streamWhy(s: { decision: string | null; reason: string | null; notes: Notes; started?: boolean }): string {
   if (s.started === false) return "No viewer has started this stream.";
-  if (s.decision === "transcode") return s.reason ? `Video is transcoded: ${s.reason}` : "Video is transcoded. No reason was reported.";
+  if (s.decision === "transcode") return s.reason ? `Video is transcoded: ${reasonText(s.reason)}` : "Video is transcoded. No reason was reported.";
   if (s.decision === "copy") {
     return s.notes.audio === "transcode"
       ? `Video is sent unchanged. Audio is converted${s.notes.audioReason ? `: ${s.notes.audioReason}` : "."}`
@@ -93,12 +93,12 @@ export function streamLines(s: { decision: string | null; notes: Notes; kbps?: n
 // ─── A viewer's numbers ───────────────────────────────────────────
 
 /** What a viewer received, and from where: the server, Discord's cache, other viewers. */
-export function DataCell({ d }: { d: ViewerData }) {
+export function DataCell({ d, legend = false }: { d: ViewerData; legend?: boolean | "compact" }) {
   const total = d.httpBytes + d.p2pBytes;
   return (
     <div className="data-cell">
       <strong className="nowrap">{bytes(total)}</strong>
-      <SplitBar server={d.botBytes} cache={Math.min(d.edgeHitBytes, d.httpBytes)} peers={d.p2pBytes} legend={false} />
+      <SplitBar server={d.botBytes} cache={Math.min(d.edgeHitBytes, d.httpBytes)} peers={d.p2pBytes} legend={legend} />
     </div>
   );
 }
@@ -116,7 +116,7 @@ export function BufferingCell({ d }: { d: ViewerData }) {
     <span className={`health ${tone}`}>
       <span className={`dot ${tone}`} />
       <span>
-        {d.stalls > 0 && <span className="nowrap">{d.stalls} {d.stalls === 1 ? "event" : "events"} · {clock(d.stalledMs / 1000)}</span>}
+        {d.stalls > 0 && <span className="nowrap">{d.stalls} {d.stalls === 1 ? "event" : "events"} · {duration(d.stalledMs)}</span>}
         {d.errors > 0 && <span className="small nowrap"> {d.stalls > 0 ? "· " : ""}{d.errors} player {d.errors === 1 ? "error" : "errors"}</span>}
       </span>
     </span>
@@ -181,3 +181,48 @@ export function useLoad<T>(load: () => Promise<T>, deps: unknown[], onError: (e:
 // ─── A session's timeline, event by event: events.ts ─────────────
 
 export { eventText, eventTone, GROUP_LABELS, groupOf, type EventContext, type EventGroup } from "./events";
+
+/** A section's heading, with a line on what it shows and anything that acts on it beside it. */
+export function BlockHead({ title, help, children }: { title: React.ReactNode; help?: React.ReactNode; children?: React.ReactNode }) {
+  return (
+    <div className="block-head">
+      <div className="block-title">
+        <h4>{title}</h4>
+        {help && <p className="block-help">{help}</p>}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+/** Links to a page's sections, in a bar that stays at the top while the page scrolls. */
+export function SectionNav({ sections }: { sections: Array<[string, string]> }) {
+  return (
+    <nav className="section-nav" aria-label="Sections">
+      {sections.map(([id, label]) => (
+        <button key={id} type="button" className="link" onClick={() => document.getElementById(`sec-${id}`)?.scrollIntoView({ behavior: "smooth", block: "start" })}>
+          {label}
+        </button>
+      ))}
+    </nav>
+  );
+}
+
+/** A transcode reason as the server recorded it (services/ffmpeg/plan.ts), in the dashboard's terms; older sessions' reasons too. */
+const REASON_WORDS: Array<[RegExp, string]> = [
+  [/(\d+)-bit picture: frames dropped on this player/, "$1-bit video: frames dropped by the client"],
+  [/: not decoded by this player/, ": not supported by the client"],
+  [/: not decoded by Discord's player/, ": not supported by Discord's player"],
+  [/^Above 1080p: this player can't decode it smoothly$/, "Above 1080p: not decoded smoothly by the client"],
+  [/ for a screen in SDR$/, " on an SDR display"],
+  [/^video is (.+)$/, "Video codec $1 not supported"],
+  [/^no video stream$/, "No video stream"],
+  [/^picture size unknown$/, "Video resolution unknown"],
+  [/^no audio track (\d+)$/, "Audio track $1 not found"],
+  [/^Over the room's bandwidth: /, "Exceeds the session bandwidth limit: "],
+];
+export function reasonText(reason: string): string {
+  let out = reason;
+  for (const [re, to] of REASON_WORDS) out = out.replace(re, to);
+  return out.charAt(0).toUpperCase() + out.slice(1);
+}

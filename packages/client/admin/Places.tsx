@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { api } from "./api";
 import type { PlaceGuild, UsageRow } from "./types";
-import { clock, dateTime } from "./format";
+import { dayTime, hoursMinutes } from "./format";
 import { Downloads, PlaceName, useLoad, Who } from "./parts";
+import { MiniChart } from "./lazy";
 
 const PAGE = 50;
 
@@ -16,6 +17,7 @@ export function Places({ onError }: { onError: (e: unknown) => void }) {
         <h1>Discord Servers</h1>
         <p className="muted">Discord servers and channels where the Activity is used, with launches, users and sessions.</p>
       </div>
+      <MiniChart kind="servers" onError={onError} />
       {busy && !data ? <p className="empty">Loading…</p> : guilds.length === 0
         ? <section className="card"><p className="empty">No launches have been recorded yet.</p></section>
         : guilds.map((g) => <GuildCard key={g.guildId ?? "none"} g={g} />)}
@@ -35,12 +37,12 @@ function GuildCard({ g }: { g: PlaceGuild }) {
             <span>{g.channels.length} {g.channels.length === 1 ? "channel" : "channels"}</span>
             <span>{g.launches} {g.launches === 1 ? "launch" : "launches"}</span>
             <span>{g.people} {g.people === 1 ? "user" : "users"}</span>
-            <span>{g.plays} {g.plays === 1 ? "session" : "sessions"} · {clock(g.playedS)} played</span>
+            <span>{g.plays} {g.plays === 1 ? "session" : "sessions"} · {hoursMinutes(g.playedS)} played</span>
           </div>
         </div>
         <dl className="room-ids">
-          <dt>First active</dt><dd>{dateTime(g.first)}</dd>
-          <dt>Last active</dt><dd>{dateTime(g.last)}</dd>
+          <dt>First active</dt><dd>{dayTime(g.first)}</dd>
+          <dt>Last active</dt><dd>{dayTime(g.last)}</dd>
         </dl>
       </header>
       <div className="table-wrap">
@@ -60,9 +62,9 @@ function GuildCard({ g }: { g: PlaceGuild }) {
                   {c.people === 0 && "—"}
                 </td>
                 <td>{c.plays || "—"}</td>
-                <td className="nowrap">{clock(c.playedS)}</td>
-                <td className="nowrap">{dateTime(c.first)}</td>
-                <td className="nowrap">{dateTime(c.last)}</td>
+                <td className="nowrap">{hoursMinutes(c.playedS)}</td>
+                <td className="nowrap">{dayTime(c.first)}</td>
+                <td className="nowrap">{dayTime(c.last)}</td>
               </tr>
             ))}
           </tbody>
@@ -93,7 +95,7 @@ function Launches({ onError }: { onError: (e: unknown) => void }) {
             <tbody>
               {rows.map((u) => (
                 <tr key={u.id}>
-                  <td className="nowrap">{dateTime(u.at)}</td>
+                  <td className="nowrap">{dayTime(u.at)}</td>
                   <td>{kindName(u.kind)}</td>
                   <td><Who id={u.userId} name={u.username} /></td>
                   <td className="mono">{u.userId ?? "—"}</td>

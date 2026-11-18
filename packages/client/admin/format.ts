@@ -22,7 +22,7 @@ export function ago(seconds: number): string {
 
 const two = (n: number) => String(n).padStart(2, "0");
 
-/** 2026-11-10 18:36:04, local time. */
+/** 2026-11-10 6:36:04 PM, local time. */
 export function dateTime(at: number | string | null | undefined): string {
   if (at === null || at === undefined) return "—";
   const d = new Date(at);
@@ -30,11 +30,65 @@ export function dateTime(at: number | string | null | undefined): string {
   return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())} ${timeOfDay(at)}`;
 }
 
-/** 18:36:04, local time. */
+/** The hour on a 12-hour clock, and AM or PM: 0 is 12 AM, 12 is 12 PM. */
+const twelve = (h: number): [number, string] => [h % 12 || 12, h < 12 ? "AM" : "PM"];
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** "17 Nov, 6:36 PM", local time: a moment in a period of days. */
+export function dayTime(at: number | string | null | undefined, now = Date.now()): string {
+  const day = dayDate(at, now);
+  return day === "—" ? day : `${day}, ${shortTime(at)}`;
+}
+
+/** "17 Nov", or "17 Nov 2025" in another year: a day. */
+export function dayDate(at: number | string | null | undefined, now = Date.now()): string {
+  if (at === null || at === undefined) return "—";
+  const d = new Date(at);
+  if (Number.isNaN(d.getTime())) return "—";
+  const year = d.getFullYear() === new Date(now).getFullYear() ? "" : ` ${d.getFullYear()}`;
+  return `${d.getDate()} ${MONTHS[d.getMonth()]}${year}`;
+}
+
+/** 16 h 52 min, 45 min, 40 s: a total of time, as a person's watch time. */
+export function hoursMinutes(totalS: number): string {
+  const s = Math.max(0, Math.round(totalS));
+  if (s < 60) return `${s} s`;
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  return h ? `${h} h ${m} min` : `${m} min`;
+}
+
+/** 850 ms, 1.4 s, 12 s, 1:04, 1:02:05: how long something took. */
+export function duration(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  if (ms < 10_000) return `${(ms / 1000).toFixed(1).replace(/\.0$/, "")} s`;
+  if (ms < 60_000) return `${Math.round(ms / 1000)} s`;
+  return clock(Math.round(ms / 1000));
+}
+
+/** 6:36:04 PM, local time. */
 export function timeOfDay(at: number | string | null | undefined): string {
   if (at === null || at === undefined) return "—";
   const d = new Date(at);
-  return Number.isNaN(d.getTime()) ? "—" : `${two(d.getHours())}:${two(d.getMinutes())}:${two(d.getSeconds())}`;
+  if (Number.isNaN(d.getTime())) return "—";
+  const [h, half] = twelve(d.getHours());
+  return `${h}:${two(d.getMinutes())}:${two(d.getSeconds())} ${half}`;
+}
+
+/** 6:36 PM, local time: a chart axis's time. */
+export function shortTime(at: number | string | null | undefined): string {
+  if (at === null || at === undefined) return "—";
+  const d = new Date(at);
+  if (Number.isNaN(d.getTime())) return "—";
+  const [h, half] = twelve(d.getHours());
+  return `${h}:${two(d.getMinutes())} ${half}`;
+}
+
+/** An hour of the day, 0–23, as "12 AM", "6 PM". */
+export function hourLabel(hour: number): string {
+  const [h, half] = twelve(((hour % 24) + 24) % 24);
+  return `${h} ${half}`;
 }
 
 /** How far this browser's clock is from UTC: "UTC−5", "UTC+5:30", "UTC". */

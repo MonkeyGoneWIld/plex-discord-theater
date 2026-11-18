@@ -39,7 +39,7 @@ function Storage({ caches }: { caches: CacheView[] }) {
       <header className="room-head">
         <div>
           <h3>Storage used</h3>
-          <p className="muted small cache-what">The total size of everything the server stores, and each cache's share of it. Largest first.</p>
+          <p className="muted small cache-what">Total storage used by the server, with each cache's share, largest first.</p>
         </div>
         <div className="cache-size">
           <strong className="storage-total">{bytes(total)}</strong>
@@ -60,7 +60,7 @@ function Storage({ caches }: { caches: CacheView[] }) {
                     <span className="storage-pct">{part > 0 && part < 0.001 ? "<0.1%" : `${(part * 100).toFixed(1)}%`}</span>
                   </td>
                   <td className="num nowrap">{bytes(c.bytes)}</td>
-                  <td className="num nowrap muted">{c.limitBytes ? bytes(c.limitBytes) : "None"}</td>
+                  <td className="num nowrap muted">{c.limitBytes ? bytes(c.limitBytes) : "No limit"}</td>
                   <td className="num">{c.items.toLocaleString("en")}</td>
                 </tr>
               );
@@ -81,7 +81,7 @@ function SumTile({ label, s }: { label: string; s: CacheSums }) {
       <div className="tile-label">{label}</div>
       <div className="tile-value">{share(s.hitShare)}</div>
       <div className="tile-sub">of HTTP data was served by Discord's cache</div>
-      <div className="small nowrap">Downloaded over HTTP {bytes(s.httpBytes)}</div>
+      <div className="small nowrap">Received over HTTP {bytes(s.httpBytes)}</div>
       <SplitBar server={s.botBytes} cache={Math.min(s.edgeHitBytes, s.httpBytes)} peers={s.p2pBytes} />
     </div>
   );

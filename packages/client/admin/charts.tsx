@@ -1,5 +1,8 @@
 import { useState, type ReactNode } from "react";
-import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { Area, AreaChart, Bar, BarChart, CartesianGrid, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { dayTime, shortTime } from "./format";
+import { niceTicks, timeTicks } from "./lanes";
+import { useWidth } from "./timeline";
 
 /**
  * The admin page's charts: columns over time, drawn with Recharts, and bars
@@ -94,7 +97,7 @@ function Tip({ active, payload, label, series, fmt, title }: TipProps & {
       {[...series].reverse().map((s) => (
         <div key={s.key} className="tip-row">
           <span className="tip-key" style={{ background: s.color }} />
-          <strong>{fmt(Number(row[s.key]) || 0)}</strong>
+          <strong>{row[s.key] === null || row[s.key] === undefined ? "—" : fmt(Number(row[s.key]) || 0)}</strong>
           <span className="muted">{s.label}</span>
         </div>
       ))}
@@ -135,6 +138,69 @@ export function Columns({ rows, x, series, fmt, axisFmt = fmt, height = 220, sta
               stroke={stacked ? "var(--surface)" : undefined} strokeWidth={stacked ? 2 : 0} isAnimationActive={false} />
           ))}
         </BarChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const DAY_MS = 86_400_000;
+
+/**
+ * Lines over a time axis in local 12-hour time: one series or several (each
+ * with a light fill below it, or stacked), one tooltip for every series at
+ * the time under the pointer, and a gap where nothing was recorded (null).
+ * Rows carry their time as `at`.
+ */
+export function Lines({ rows, series, fmt, axisFmt = fmt, height = 200, from, to, max, stacked = false, threshold, curve = "linear" }: {
+  rows: Row[];
+  series: Series[];
+  fmt: (n: number) => string;
+  axisFmt?: (n: number) => string;
+  height?: number;
+  from: number;
+  to: number;
+  /** The axis's top, as for a percentage; else from the data. */
+  max?: number;
+  stacked?: boolean;
+  /** A dashed line across at a value, with what it marks. */
+  threshold?: { value: number; label: string };
+  /** Steps, for counts that hold until they change. */
+  curve?: "linear" | "stepAfter";
+}) {
+  const [ref, width] = useWidth<HTMLDivElement>();
+  const { ticks, stepMs } = timeTicks(from, to, Math.max(0, width - 70), width < 560 ? 76 : 110);
+  // The value axis: a fixed top (a percentage), or round steps over the data and any threshold line.
+  const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+  const dataTop = Math.max(0, threshold?.value ?? 0, ...rows.map((r) => (stacked
+    ? series.reduce((s, x) => s + num(r[x.key]), 0)
+    : Math.max(0, ...series.map((x) => num(r[x.key]))))));
+  const yTicks = max === undefined ? niceTicks(dataTop) : undefined;
+  const many = to - from > DAY_MS;
+  const tick = (t: number) => {
+    const d = new Date(t);
+    const midnight = d.getHours() === 0 && d.getMinutes() === 0;
+    return stepMs >= DAY_MS || (many && midnight) ? `${d.getDate()} ${MONTHS[d.getMonth()]}` : shortTime(t).replace(":00 ", " ");
+  };
+  return (
+    <div className="chart" style={{ height }} ref={ref}>
+      <ResponsiveContainer width="100%" height="100%">
+        <AreaChart data={rows} margin={{ top: 8, right: 10, bottom: 0, left: 0 }}>
+          <CartesianGrid vertical={false} stroke="var(--grid)" />
+          <XAxis dataKey="at" type="number" scale="time" domain={[from, to]} ticks={ticks} tickFormatter={(v) => tick(Number(v))}
+            tick={AXIS_TICK} tickLine={false} axisLine={{ stroke: "var(--axis)" }} />
+          <YAxis tick={AXIS_TICK} tickLine={false} axisLine={false} width={60} domain={[0, max ?? yTicks![yTicks!.length - 1]]} allowDecimals
+            ticks={yTicks} tickFormatter={(v) => axisFmt(Number(v))} />
+          <Tooltip isAnimationActive={false} cursor={{ stroke: "var(--axis)", strokeDasharray: "3 3" }}
+            content={(p) => <Tip active={p.active} payload={p.payload} label={p.label} series={series} fmt={fmt} title={(r) => dayTime(Number(r.at))} />} />
+          {threshold && <ReferenceLine y={threshold.value} stroke="var(--muted)" strokeDasharray="4 4"
+            label={{ value: threshold.label, position: "insideTopRight", fill: "var(--muted)", fontSize: 11 }} />}
+          {series.map((s) => (
+            <Area key={s.key} type={curve} dataKey={s.key} name={s.label} stroke={s.color} strokeWidth={2} fill={s.color}
+              fillOpacity={stacked ? 0.55 : 0.08} stackId={stacked ? "all" : undefined} isAnimationActive={false} dot={false}
+              connectNulls={false} activeDot={{ r: 4, strokeWidth: 2, stroke: "var(--surface)" }} />
+          ))}
+        </AreaChart>
       </ResponsiveContainer>
     </div>
   );
@@ -200,5 +266,5 @@ export function count(n: number): string {
 export function hours(seconds: number): string {
   if (seconds < 3600) return `${Math.round(seconds / 60)} min`;
   const h = seconds / 3600;
-  return `${h >= 100 ? count(Math.round(h)) : h.toFixed(1)} h`;
+  return `${h >= 100 ? count(Math.round(h)) : h.toFixed(1).replace(/\.0$/, "")} h`;
 }

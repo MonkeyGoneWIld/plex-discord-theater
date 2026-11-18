@@ -50,6 +50,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { gzip } from "node:zlib";
 import { logEvent } from "../logger.js";
+import { adminHooks } from "../admin-hooks.js";
 import {
   fileRanges, mkvBlocks, mkvSubtitleIndex, openFileRanges, subtitleTrackFor, type PlexSubtitleStream,
 } from "../mkv-subtitles.js";
@@ -795,6 +796,8 @@ function next(job: Job): void {
       logEvent("Subtitles", "couldn't cut a picture subtitle out of the film", {
         key: job.key, piece: id, why: job.failed, ms: Date.now() - job.startedAt,
       });
+      adminHooks.processing({ at: Date.now(), kind: "picture subtitle", ratingKey: titleOfKey.get(job.key) ?? null,
+        ms: Date.now() - job.startedAt, ok: false, detail: { key: job.key, why: job.failed } });
       return;
     }
     next(job);
@@ -843,6 +846,8 @@ function finish(job: Job): void {
       key: job.key, pieces: job.old.length, bytes: buf.length, handedOutIn: job.pieces.length, ms: Date.now() - job.startedAt,
       by: [...job.by].join("+") || "none",
     });
+    adminHooks.processing({ at: Date.now(), kind: "picture subtitle", ratingKey: titleOfKey.get(job.key) ?? null,
+      ms: Date.now() - job.startedAt, ok: true, detail: { key: job.key, pieces: job.old.length, bytes: buf.length, by: [...job.by].join("+") || null } });
     // Pieces a player is part way through stay readable until the job is let go.
     trim();
   } catch (err) {
@@ -903,6 +908,16 @@ export function pgsStatus(key: string, source: () => Promise<PgsSource | null>, 
   job.wanted = undefined;
   follow(job, Math.max(0, atS));
   return statusOf(job);
+}
+
+/** The title each cut is for, by its key, as the routes say: the Theater Dashboard attributes its time to the title's session. */
+const titleOfKey = new Map<string, string>();
+
+/** Say which title a cut's key belongs to (routes/plex.ts, where the key is made). */
+export function pgsTitle(key: string, ratingKey: string): void {
+  titleOfKey.delete(key);
+  titleOfKey.set(key, ratingKey);
+  while (titleOfKey.size > 500) titleOfKey.delete(titleOfKey.keys().next().value as string);
 }
 
 /** The pages that started a cut ahead, by who is looking: their next page's replaces it. */

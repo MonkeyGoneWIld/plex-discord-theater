@@ -17,7 +17,8 @@ export const SOURCES = [
 /** 4.2 Mbps, 850 kbps, 0 kbps: a rate in bits a second. */
 export function bps(n: number | null | undefined): string {
   if (n === null || n === undefined || !Number.isFinite(n)) return "—";
-  if (n >= 1e6) return `${(n / 1e6).toFixed(n >= 1e8 ? 0 : 1)} Mbps`;
+  // 15 Mbps rather than 15.0 Mbps: a tenth only where there is one.
+  if (n >= 1e6) return `${(n / 1e6).toFixed(n >= 1e8 ? 0 : 1).replace(/\.0$/, "")} Mbps`;
   return `${Math.round(n / 1e3)} kbps`;
 }
 

@@ -1,12 +1,13 @@
 import { useState } from "react";
 import { api, type GraphPeriod } from "./api";
-import type { GraphDay, Graphs as GraphData } from "./types";
-import { bytes, clock, dateTime, zoneLabel } from "./format";
-import { useLoad } from "./parts";
+import type { GraphDay, Graphs as GraphData, PersonPlay, SystemLoad } from "./types";
+import { bytes, clock, dayDate, dayTime, duration, hourLabel, zoneLabel } from "./format";
+import { reasonText, SectionNav, useLoad } from "./parts";
+import { PROCESSING_HELP, PROCESSING_NAMES, PROCESSING_ORDER } from "./processing";
 import { usePlaceNames } from "./names";
 import { ShareList } from "./viz";
 import { clientName } from "./clients";
-import { Bars, byteUnit, ChartCard, COLORS, Columns, count, hours, SeriesTable, type Series } from "./charts";
+import { Bars, byteUnit, ChartCard, COLORS, Columns, count, hours, Lines, SeriesTable, type Series } from "./charts";
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
@@ -22,15 +23,18 @@ const PERIODS: Array<{ label: string; p: GraphPeriod }> = [
 const samePeriod = (a: GraphPeriod, b: GraphPeriod) => JSON.stringify(a) === JSON.stringify(b);
 
 interface Bucket extends GraphDay {
-  /** On the axis: "10 Nov", "14:00". */
+  /** On the axis: "10 Nov", "2 PM". */
   label: string;
-  /** In the tooltip: "10 Nov 2026", "Week of 3 Nov 2026", "November 2026", "10 Nov 2026, 14:00–14:59". */
+  /** In the tooltip: "10 Nov 2026", "Week of 3 Nov 2026", "November 2026", "10 Nov 2026, 2:00–2:59 PM". */
   title: string;
 }
 
 const dayName = (ms: number) => { const d = new Date(ms); return `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]}`; };
 const fullDay = (ms: number) => `${dayName(ms)} ${new Date(ms).getUTCFullYear()}`;
-const hh = (ms: number) => String(new Date(ms).getUTCHours()).padStart(2, "0");
+/** The hour a bucket starts at, on the clock of the time zone it was counted in. */
+const hourOf = (ms: number) => new Date(ms).getUTCHours();
+/** "2:00–2:59 PM". */
+const hourSpan = (h: number) => { const [n, half] = hourLabel(h).split(" "); return `${n}:00–${n}:59 ${half}`; };
 
 /** A period from one local midnight to another. */
 const wholeDays = (from: number, to: number) =>
@@ -39,8 +43,8 @@ const wholeDays = (from: number, to: number) =>
 /** Hours as they are; days up to 120 of them; past that, weeks; past two years, months. */
 function bucketed(daily: GraphDay[], bucket: "day" | "hour"): { by: "hour" | "day" | "week" | "month"; rows: Bucket[] } {
   if (bucket === "hour") {
-    return { by: "hour", rows: daily.map((d) => ({ ...d, label: hh(d.day) === "00" ? `${dayName(d.day)} 00:00` : `${hh(d.day)}:00`,
-      title: `${fullDay(d.day)}, ${hh(d.day)}:00–${hh(d.day)}:59` })) };
+    return { by: "hour", rows: daily.map((d) => ({ ...d, label: hourOf(d.day) === 0 ? dayName(d.day) : hourLabel(hourOf(d.day)),
+      title: `${fullDay(d.day)}, ${hourSpan(hourOf(d.day))}` })) };
   }
   const by = daily.length <= 120 ? "day" : daily.length <= 730 ? "week" : "month";
   const groups = new Map<string, Bucket>();
@@ -155,8 +159,8 @@ export function Graphs({ onError }: { onError: (e: unknown) => void }) {
       {data && (
         <p className="muted small period-shown">
           {/* Whole days, as "21 September to 1 October" was asked: the end day by its date. */}
-          {wholeDays(data.from, data.to) ? dateTime(data.from).slice(0, 10) : dateTime(data.from)} to {data.to > Date.now() ? "now"
-            : wholeDays(data.from, data.to) ? `the end of ${dateTime(data.to - 1).slice(0, 10)}` : dateTime(data.to)}
+          {wholeDays(data.from, data.to) ? dayDate(data.from) : dayTime(data.from)} – {data.to > Date.now() ? "now"
+            : wholeDays(data.from, data.to) ? `end of ${dayDate(data.to - 1)}` : dayTime(data.to)}
           {data.bucket === "hour" ? " · Hourly" : ""}
         </p>
       )}
@@ -186,18 +190,18 @@ function Upload({ g, rows, per, label }: { g: GraphData; rows: Bucket[]; per: st
         <h3>Server upload</h3>
         <span className="muted small">
           {u.since === null ? "No upload data has been recorded yet."
-            : `All data sent by the server, including video, playlists, subtitles and the Activity page, since ${dateTime(u.since)}.`}
+            : `All data sent by the server, including video, playlists, subtitles and the Activity page, since ${dayTime(u.since)}.`}
         </span>
       </div>
-      <div className="tiles">
+      <div className="tiles four">
         <Tile label="Sent by the server" value={bytes(u.sentBytes)} sub={`${count(u.allMinutes)} minutes with traffic`} />
         <Tile label="Average while playing" value={mbps(u.avgKbps)} sub={`${mibs(u.avgKbps)} · over ${count(u.minutes)} minutes`} />
         <Tile label="95th percentile" value={mbps(u.p95Kbps)} sub={`${mibs(u.p95Kbps)} · 95% of minutes at or below this rate`} />
-        <Tile label="Busiest minute" value={mbps(u.peakKbps)} sub={`${mibs(u.peakKbps)}${u.peakAt ? ` · ${dateTime(u.peakAt)}` : ""}`} />
+        <Tile label="Busiest minute" value={mbps(u.peakKbps)} sub={`${mibs(u.peakKbps)}${u.peakAt ? ` · ${dayTime(u.peakAt)}` : ""}`} />
       </div>
       <h4>By number of viewers</h4>
       <div className="table-wrap">
-        <table className="table">
+        <table className="table wrap-heads">
           <thead>
             <tr><th>Viewers</th><th className="num">Minutes</th><th className="num">Average</th><th className="num">95th pct.</th>
               <th className="num">Busiest</th><th className="num">Relative to bitrate</th></tr>
@@ -244,27 +248,83 @@ function reasonSeries(g: GraphData): { series: Series[]; daily: GraphDay[] } {
   const other = (g.reasonDays ?? []).some((x) => key(x.reason) === "rOther");
   const keys = [...top.map((_, i) => `r${i}`), ...(other ? ["rOther"] : [])];
   const daily = g.daily.map((d) => ({ ...d, ...Object.fromEntries(keys.map((k) => [k, by.get(d.day)?.[k] ?? 0])) })) as GraphDay[];
-  const series: Series[] = [...top.map((r, i) => ({ key: `r${i}`, label: r, color: COLORS[i] })),
+  const series: Series[] = [...top.map((r, i) => ({ key: `r${i}`, label: reasonText(r), color: COLORS[i] })),
     ...(other ? [{ key: "rOther", label: "Other reasons", color: "var(--muted)" }] : [])];
   return { series, daily };
 }
 
+/** The three Discord servers with the most watch time get a colour each; the rest are "Other servers". */
+function serverSeries(g: GraphData, guild: (id: string | null) => string): { series: Series[]; extra: Map<number, Record<string, number>> } {
+  const total = new Map<string, number>();
+  for (const x of g.serverDays ?? []) total.set(String(x.guildId), (total.get(String(x.guildId)) ?? 0) + x.watchedS);
+  const top = [...total].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k]) => k);
+  const extra = new Map<number, Record<string, number>>();
+  let other = false;
+  for (const x of g.serverDays ?? []) {
+    const i = top.indexOf(String(x.guildId));
+    const k = i >= 0 ? `sv${i}` : "svOther";
+    if (i < 0) other = true;
+    const day = extra.get(x.day) ?? {};
+    day[k] = (day[k] ?? 0) + x.watchedS / 3600;
+    extra.set(x.day, day);
+  }
+  const series: Series[] = [...top.map((id, i) => ({ key: `sv${i}`, label: guild(id === "null" ? null : id), color: COLORS[i] })),
+    ...(other ? [{ key: "svOther", label: "Other servers", color: "var(--muted)" }] : [])];
+  return { series, extra };
+}
+
+const REQUEST_SERIES: Series[] = [
+  { key: "rqNew", label: "Requested", color: COLORS[0] },
+  { key: "rqDup", label: "Already requested", color: COLORS[1] },
+  { key: "rqFail", label: "Failed", color: "var(--bad)" },
+];
+const requestKey = (outcome: string) => (outcome === "requested" ? "rqNew" : outcome === "already requested" ? "rqDup" : "rqFail");
+
+/**
+ * Every bucket's extra numbers: the watch time by server, the requests by
+ * result, and the time to the first segment (as a sum and a count, so a week
+ * or a month of days can be averaged).
+ */
+function withExtras(g: GraphData, daily: GraphDay[], servers: Map<number, Record<string, number>>): GraphDay[] {
+  const by = new Map<number, Record<string, number>>();
+  const at = (day: number) => by.get(day) ?? by.set(day, {}).get(day)!;
+  for (const x of g.requestDays ?? []) { const d = at(x.day); d[requestKey(x.outcome)] = (d[requestKey(x.outcome)] ?? 0) + x.requests; }
+  for (const x of g.processingDays ?? []) {
+    const d = at(x.day);
+    const k = x.way === "transcode" ? "fsEnc" : "fsCopy";
+    d[`${k}Sum`] = (d[`${k}Sum`] ?? 0) + x.p50Ms * x.count;
+    d[`${k}N`] = (d[`${k}N`] ?? 0) + x.count;
+  }
+  const keys = ["rqNew", "rqDup", "rqFail", "fsEncSum", "fsEncN", "fsCopySum", "fsCopyN", "sv0", "sv1", "sv2", "svOther"];
+  return daily.map((d) => {
+    const x = { ...by.get(d.day), ...servers.get(d.day) };
+    return { ...d, ...Object.fromEntries(keys.map((k) => [k, x[k] ?? 0])) };
+  }) as GraphDay[];
+}
+
 function GraphsBody({ g }: { g: GraphData }) {
-  const reasonsOver = reasonSeries(g);
-  const { by, rows } = bucketed(reasonsOver.daily, g.bucket);
-  const per = by === "hour" ? "per hour" : by === "day" ? "per day" : by === "week" ? "per week" : "per month";
   const names = usePlaceNames();
+  const guild = (id: string | null) => names.guild(id) ?? id ?? "Direct message";
+  const reasonsOver = reasonSeries(g);
+  const servers = serverSeries(g, guild);
+  const { by, rows } = bucketed(withExtras(g, reasonsOver.daily, servers.extra), g.bucket);
+  const per = by === "hour" ? "per hour" : by === "day" ? "per day" : by === "week" ? "per week" : "per month";
   const t = g.totals;
   const unit = byteUnit(Math.max(0, ...rows.map((r) => r.botBytes + r.edgeHitBytes + r.p2pBytes)));
   const inUnit = (n: number) => `${n >= 100 ? Math.round(n) : n >= 10 ? n.toFixed(1) : n.toFixed(2)} ${unit.label}`;
   const unitAxis = (n: number) => `${count(n)} ${unit.label}`;
-  const chartRows = rows.map((r) => ({
-    ...r,
-    watchedH: r.watchedS / 3600,
-    bot: r.botBytes / unit.div,
-    hit: r.edgeHitBytes / unit.div,
-    p2p: r.p2pBytes / unit.div,
-  }));
+  const chartRows = rows.map((r) => {
+    const x = r as unknown as Record<string, number>;
+    return {
+      ...r,
+      watchedH: r.watchedS / 3600,
+      bot: r.botBytes / unit.div,
+      hit: r.edgeHitBytes / unit.div,
+      p2p: r.p2pBytes / unit.div,
+      fsCopy: x.fsCopyN ? x.fsCopySum / x.fsCopyN : null,
+      fsEnc: x.fsEncN ? x.fsEncSum / x.fsEncN : null,
+    };
+  });
   const one = (key: string, label: string): Series[] => [{ key, label, color: COLORS[0] }];
   const data: Series[] = [
     { key: "bot", label: "Server", color: COLORS[0] },
@@ -272,28 +332,30 @@ function GraphsBody({ g }: { g: GraphData }) {
     { key: "p2p", label: "Peers", color: COLORS[2] },
   ];
   const streams: Series[] = [
-    { key: "copies", label: "Direct", color: COLORS[0] },
-    { key: "reencodes", label: "Transcoded", color: COLORS[1] },
+    { key: "copies", label: "Direct play / direct stream", color: COLORS[0] },
+    { key: "reencodes", label: "Transcode", color: COLORS[1] },
   ];
-  const asks: Series[] = [
-    { key: "launches", label: "Launches", color: COLORS[0] },
-    { key: "requests", label: "Requests", color: COLORS[1] },
+  const firstSeg: Series[] = [
+    { key: "fsCopy", label: "Remux", color: COLORS[0] },
+    { key: "fsEnc", label: "Transcode", color: COLORS[1] },
   ];
-  const hourRows = g.hours.map((h) => ({ ...h, label: String(h.hour).padStart(2, "0"),
-    title: `${String(h.hour).padStart(2, "0")}:00–${String(h.hour).padStart(2, "0")}:59` }));
+  const hourRows = g.hours.map((h) => ({ ...h, label: hourLabel(h.hour), title: hourSpan(h.hour) }));
   const weekRows = [1, 2, 3, 4, 5, 6, 0].map((w) => ({ ...g.weekdays[w], label: WEEKDAYS[w].slice(0, 3), title: WEEKDAYS[w] }));
   const titleRows = g.titles.map((x) => ({ ...x, name: x.title ?? `Plex item ${x.ratingKey}` }));
   const peopleRows = g.people.map((x) => ({ ...x, name: x.username ?? x.userId }));
   const sharerRows = (g.sharers ?? []).map((x) => ({ ...x, name: x.username ?? x.userId }));
   const pairRows = (g.pairs ?? []).map((x) => ({ ...x, name: `${x.fromName ?? x.from} → ${x.toName ?? x.to}` }));
-  const serverRows = g.servers.map((x) => ({ ...x, name: names.guild(x.guildId) ?? x.guildId ?? "Direct message" }));
+  const serverRows = g.servers.map((x) => ({ ...x, name: guild(x.guildId) }));
+  const reasonRows = g.reasons.map((x) => ({ ...x, reason: reasonText(x.reason) }));
   const rowLabel = by === "hour" ? "Hour" : by === "day" ? "Day" : by === "week" ? "Week of" : "Month";
   const table = (series: Series[], fmt: (n: number) => string, r: Array<Record<string, unknown>> = chartRows, label = rowLabel) =>
     <SeriesTable rows={r} label={label} labelKey="label" series={series} fmt={fmt} />;
+  const anyRequests = (g.requestDays?.length ?? 0) > 0;
+  const anyFirst = (g.processingDays?.length ?? 0) > 0;
 
   return (
     <>
-      <div className="tiles">
+      <div className="tiles six">
         <Tile label="Sessions" value={count(t.plays)} sub={`${hours(t.playedS)} of playback`} />
         <Tile label="Watch time" value={hours(t.watchedS)} sub="Combined across all viewers" />
         <Tile label="Users" value={count(t.people)} sub={`${count(t.launches)} launches · ${count(t.requests)} requests`} />
@@ -302,96 +364,199 @@ function GraphsBody({ g }: { g: GraphData }) {
         <Tile label="Transcoded streams" value={t.streams ? share(t.reencodes / t.streams) : "—"}
           sub={`${count(t.reencodes)} of ${count(t.streams)} streams`} />
         <Tile label="Buffering" value={`${count(t.stalls)} ${t.stalls === 1 ? "event" : "events"}`}
-          sub={`${clock(t.stalledMs / 1000)} in total · ${count(t.errors)} player errors`} />
+          sub={`${duration(t.stalledMs)} in total · ${count(t.errors)} player ${t.errors === 1 ? "error" : "errors"}`} />
       </div>
 
       {t.plays === 0 && t.launches === 0 && t.requests === 0 && (
         <p className="note">No activity was recorded in this period.</p>
       )}
 
-      <Upload g={g} rows={rows} per={per} label={rowLabel} />
+      <SectionNav sections={[["usage", "Usage"], ["audience", "Users, titles and servers"], ["delivery", "Data delivery"],
+        ["streams", "Streams and processing"], ["quality", "Playback quality"], ["requests", "Launches and requests"]]} />
 
-      <div className="charts">
-        <ChartCard title={`Sessions ${per}`} series={one("plays", "Sessions")} table={table(one("plays", "Sessions"), count)}>
-          <Columns rows={chartRows} x="label" series={one("plays", "Sessions")} fmt={count} tipTitle={tipTitle} />
-        </ChartCard>
-        <ChartCard title={`Watch time ${per}`} sub="Combined across all viewers" series={one("watchedH", "Hours watched")}
-          table={table(one("watchedS", "Watch time"), hours)}>
-          <Columns rows={chartRows} x="label" series={one("watchedH", "Hours watched")} fmt={(n) => hours(n * 3600)}
-            axisFmt={(n) => `${count(n)} h`} decimals tipTitle={tipTitle} />
-        </ChartCard>
-        <ChartCard title={`Data delivered ${per}, by source`} series={data}
-          table={table(data, inUnit)} wide>
-          <Columns rows={chartRows} x="label" series={data} fmt={inUnit} axisFmt={unitAxis} decimals stacked tipTitle={tipTitle} height={240} />
-        </ChartCard>
-        <ChartCard title={`Streams ${per}`} sub="Sent unchanged (direct) or transcoded" series={streams} table={table(streams, count)}>
-          <Columns rows={chartRows} x="label" series={streams} fmt={count} stacked tipTitle={tipTitle} />
-        </ChartCard>
-        {reasonsOver.series.length > 0 && (
-          <ChartCard title={`Transcode reasons ${per}`} sub="Streams transcoded, by why" series={reasonsOver.series}
-            table={table(reasonsOver.series, count)}>
-            <Columns rows={chartRows} x="label" series={reasonsOver.series} fmt={count} stacked tipTitle={tipTitle} />
+      <StatsGroup id="usage" title="Usage" help="Sessions and watch time over the period, and when sessions take place.">
+        <div className="charts">
+          <ChartCard title={`Sessions ${per}`} series={one("plays", "Sessions")} table={table(one("plays", "Sessions"), count)}>
+            <Columns rows={chartRows} x="label" series={one("plays", "Sessions")} fmt={count} tipTitle={tipTitle} />
           </ChartCard>
-        )}
-        <ChartCard title="Transcode reasons" series={one("streams", "Streams")}
-          table={<SeriesTable rows={g.reasons} label="Reason" labelKey="reason" series={one("streams", "Streams")} fmt={count} />}>
-          {g.reasons.length === 0 ? <p className="muted">No stream was transcoded in this period.</p>
-            : <Bars rows={g.reasons} nameKey="reason" valueKey="streams" label="Streams" fmt={count} />}
-        </ChartCard>
-        <ChartCard title={`Buffering ${per}`} sub="Playback interruptions while waiting for data" series={one("stalls", "Events")}
-          table={table([{ key: "stalls", label: "Events", color: COLORS[0] }], count)}>
-          <Columns rows={chartRows} x="label" series={one("stalls", "Events")} fmt={count} tipTitle={tipTitle} />
-        </ChartCard>
-        <ChartCard title={`Launches and requests ${per}`} series={asks} table={table(asks, count)}>
-          <Columns rows={chartRows} x="label" series={asks} fmt={count} tipTitle={tipTitle} />
-        </ChartCard>
-        <ChartCard title="Sessions by hour" sub="Hour of the day, local time" series={one("plays", "Sessions")}
-          table={table(one("plays", "Sessions"), count, hourRows, "Hour")}>
-          <Columns rows={hourRows} x="label" series={one("plays", "Sessions")} fmt={count} tipTitle={tipTitle} />
-        </ChartCard>
-        <ChartCard title="Sessions by weekday" sub="Local time" series={one("plays", "Sessions")}
-          table={table(one("plays", "Sessions"), count, weekRows, "Day")}>
-          <Columns rows={weekRows} x="label" series={one("plays", "Sessions")} fmt={count} tipTitle={tipTitle} />
-        </ChartCard>
-        {(g.heat?.length ?? 0) > 0 && (
-          <ChartCard title="Sessions by weekday and hour" sub="Local time; darker is busier" wide
-            table={<TopTable rows={(g.heat ?? []).map((c) => ({ ...c, name: `${WEEKDAYS[c.weekday]}, ${String(c.hour).padStart(2, "0")}:00` }))}
-              cols={[["Sessions", "plays", count], ["Playback", "playedS", hours]]} />}>
-            <Heatmap cells={g.heat ?? []} />
+          <ChartCard title={`Watch time ${per}`} sub="Combined across all viewers" series={one("watchedH", "Hours watched")}
+            table={table(one("watchedS", "Watch time"), hours)}>
+            <Columns rows={chartRows} x="label" series={one("watchedH", "Hours watched")} fmt={(n) => hours(n * 3600)}
+              axisFmt={(n) => `${count(n)} h`} decimals tipTitle={tipTitle} />
           </ChartCard>
-        )}
-        <ChartCard title="Most watched titles" sub="By combined watch time" series={one("watchedS", "Watch time")}
-          table={<TopTable rows={titleRows} cols={[["Sessions", "plays", count], ["Users", "people", count], ["Watch time", "watchedS", hours]]} />}>
-          {titleRows.length === 0 ? <p className="muted">No data for this period.</p>
-            : <Bars rows={titleRows} nameKey="name" valueKey="watchedS" label="Watch time" fmt={hours} />}
-        </ChartCard>
-        <ChartCard title="Most active users" sub="By watch time" series={one("watchedS", "Watch time")}
-          table={<TopTable rows={peopleRows} cols={[["Sessions", "plays", count], ["Watch time", "watchedS", hours], ["Data received", "bytes", bytes],
-            ["Sent to viewers", "upBytes", bytes]]} />}>
-          {peopleRows.length === 0 ? <p className="muted">No data for this period.</p>
-            : <Bars rows={peopleRows} nameKey="name" valueKey="watchedS" label="Watch time" fmt={hours}
-              onPick={(r) => { location.hash = `people/${String(r.userId)}`; }} />}
-        </ChartCard>
-        <ChartCard title="Top peer-to-peer sharers" sub="By data sent to other viewers" series={[{ key: "upBytes", label: "Sent to viewers", color: COLORS[2] }]}
-          table={<TopTable rows={sharerRows} cols={[["Sessions", "plays", count], ["Sent to viewers", "upBytes", bytes], ["Received from viewers", "p2pBytes", bytes]]} />}>
-          {sharerRows.length === 0 ? <p className="muted">No data was shared between viewers in this period.</p>
-            : <Bars rows={sharerRows} nameKey="name" valueKey="upBytes" label="Sent to viewers" fmt={bytes} color={COLORS[2]}
-              onPick={(r) => { location.hash = `people/${String(r.userId)}`; }} />}
-        </ChartCard>
-        <ChartCard title="Peer-to-peer transfers" sub="Data sent from one viewer to another" series={one("bytes", "Sent")}
-          table={<TopTable rows={pairRows} cols={[["Sent", "bytes", bytes]]} />}>
-          <ShareList shares={g.pairs ?? []} empty="No data was shared between viewers in this period." />
-        </ChartCard>
-        <ByClient rows={g.clients ?? []} />
-        <ProblemFiles rows={g.problems ?? []} />
-        <ChartCard title="Most active servers" sub="Discord servers by combined watch time" series={one("watchedS", "Watch time")}
-          table={<TopTable rows={serverRows} cols={[["Sessions", "plays", count], ["Users", "people", count], ["Watch time", "watchedS", hours]]} />}>
-          {serverRows.length === 0 ? <p className="muted">No data for this period.</p>
-            : <Bars rows={serverRows} nameKey="name" valueKey="watchedS" label="Watch time" fmt={hours}
-              onPick={() => { location.hash = "places"; }} />}
-        </ChartCard>
-      </div>
+          <ChartCard title="Sessions by hour" sub="Hour of the day, local time" series={one("plays", "Sessions")}
+            table={table(one("plays", "Sessions"), count, hourRows, "Hour")}>
+            <Columns rows={hourRows} x="label" series={one("plays", "Sessions")} fmt={count} tipTitle={tipTitle} />
+          </ChartCard>
+          <ChartCard title="Sessions by weekday" sub="Local time" series={one("plays", "Sessions")}
+            table={table(one("plays", "Sessions"), count, weekRows, "Day")}>
+            <Columns rows={weekRows} x="label" series={one("plays", "Sessions")} fmt={count} tipTitle={tipTitle} />
+          </ChartCard>
+          {(g.heat?.length ?? 0) > 0 && (
+            <ChartCard title="Sessions by weekday and hour" sub="Local time; darker cells had more sessions" wide
+              table={<TopTable rows={(g.heat ?? []).map((c) => ({ ...c, name: `${WEEKDAYS[c.weekday]}, ${hourSpan(c.hour)}` }))}
+                cols={[["Sessions", "plays", count], ["Playback", "playedS", hours]]} />}>
+              <Heatmap cells={g.heat ?? []} />
+            </ChartCard>
+          )}
+        </div>
+      </StatsGroup>
+
+      <StatsGroup id="audience" title="Users, titles and servers" help="Watch time by user, title and Discord server.">
+        <div className="charts">
+          <ChartCard title="Most active users" sub="By watch time" series={one("watchedS", "Watch time")}
+            table={<TopTable rows={peopleRows} cols={[["Sessions", "plays", count], ["Watch time", "watchedS", hours], ["Data received", "bytes", bytes],
+              ["Sent to peers", "upBytes", bytes]]} />}>
+            {peopleRows.length === 0 ? <p className="muted">No data for this period.</p>
+              : <Bars rows={peopleRows} nameKey="name" valueKey="watchedS" label="Watch time" fmt={hours}
+                onPick={(r) => { location.hash = `people/${String(r.userId)}`; }} />}
+          </ChartCard>
+          <ChartCard title="Most watched titles" sub="By combined watch time" series={one("watchedS", "Watch time")}
+            table={<TopTable rows={titleRows} cols={[["Sessions", "plays", count], ["Users", "people", count], ["Watch time", "watchedS", hours]]} />}>
+            {titleRows.length === 0 ? <p className="muted">No data for this period.</p>
+              : <Bars rows={titleRows} nameKey="name" valueKey="watchedS" label="Watch time" fmt={hours} />}
+          </ChartCard>
+          <ChartCard title="Most active servers" sub="Discord servers by combined watch time" series={one("watchedS", "Watch time")}
+            table={<TopTable rows={serverRows} cols={[["Sessions", "plays", count], ["Users", "people", count], ["Watch time", "watchedS", hours]]} />}>
+            {serverRows.length === 0 ? <p className="muted">No data for this period.</p>
+              : <Bars rows={serverRows} nameKey="name" valueKey="watchedS" label="Watch time" fmt={hours}
+                onPick={() => { location.hash = "places"; }} />}
+          </ChartCard>
+          {servers.series.length > 0 && (
+            <ChartCard title={`Watch time ${per}, by server`} sub="Combined across all viewers" series={servers.series}
+              table={table(servers.series, (n) => hours(n * 3600))}>
+              <Columns rows={chartRows} x="label" series={servers.series} fmt={(n) => hours(n * 3600)} axisFmt={(n) => `${count(n)} h`}
+                decimals stacked tipTitle={tipTitle} />
+            </ChartCard>
+          )}
+        </div>
+      </StatsGroup>
+
+      <StatsGroup id="delivery" title="Data delivery" help="Data delivered to players by source, server upload, and peer-to-peer transfers.">
+        <div className="charts">
+          <ChartCard title={`Data delivered ${per}, by source`} series={data} table={table(data, inUnit)} wide>
+            <Columns rows={chartRows} x="label" series={data} fmt={inUnit} axisFmt={unitAxis} decimals stacked tipTitle={tipTitle} height={240} />
+          </ChartCard>
+        </div>
+        <Upload g={g} rows={rows} per={per} label={rowLabel} />
+        <div className="charts">
+          <ChartCard title="Top peer-to-peer sharers" sub="By data sent to other viewers" series={[{ key: "upBytes", label: "Sent to peers", color: COLORS[2] }]}
+            table={<TopTable rows={sharerRows} cols={[["Sessions", "plays", count], ["Sent to peers", "upBytes", bytes], ["Received from peers", "p2pBytes", bytes]]} />}>
+            {sharerRows.length === 0 ? <p className="muted">No data was shared between viewers in this period.</p>
+              : <Bars rows={sharerRows} nameKey="name" valueKey="upBytes" label="Sent to peers" fmt={bytes} color={COLORS[2]}
+                onPick={(r) => { location.hash = `people/${String(r.userId)}`; }} />}
+          </ChartCard>
+          <ChartCard title="Peer-to-peer transfers" sub="Data sent from one viewer to another" series={one("bytes", "Sent")}
+            table={<TopTable rows={pairRows} cols={[["Sent", "bytes", bytes]]} />}>
+            <ShareList shares={g.pairs ?? []} empty="No data was shared between viewers in this period." />
+          </ChartCard>
+        </div>
+      </StatsGroup>
+
+      <StatsGroup id="streams" title="Streams and processing" help="Streams by delivery method, why streams were transcoded, how long each processing step took, and titles whose streams were corrected.">
+        <div className="charts">
+          <ChartCard title={`Streams ${per}`} sub="By delivery method" series={streams} table={table(streams, count)}>
+            <Columns rows={chartRows} x="label" series={streams} fmt={count} stacked tipTitle={tipTitle} />
+          </ChartCard>
+          {reasonsOver.series.length > 0 && (
+            <ChartCard title={`Transcode reasons ${per}`} sub="Transcoded streams, by reason" series={reasonsOver.series}
+              table={table(reasonsOver.series, count)}>
+              <Columns rows={chartRows} x="label" series={reasonsOver.series} fmt={count} stacked tipTitle={tipTitle} />
+            </ChartCard>
+          )}
+          <ChartCard title="Transcode reasons" sub="All transcoded streams in the period" series={one("streams", "Streams")}
+            table={<SeriesTable rows={reasonRows} label="Reason" labelKey="reason" series={one("streams", "Streams")} fmt={count} />}>
+            {reasonRows.length === 0 ? <p className="muted">No stream was transcoded in this period.</p>
+              : <Bars rows={reasonRows} nameKey="reason" valueKey="streams" label="Streams" fmt={count} />}
+          </ChartCard>
+          {anyFirst && (
+            <ChartCard title={`Time to first segment ${per}`} sub="Median time from FFmpeg start to the first playable segment"
+              series={firstSeg} table={table(firstSeg, duration)}>
+              <Columns rows={chartRows} x="label" series={firstSeg} fmt={duration} axisFmt={(n) => duration(n)} tipTitle={tipTitle} />
+            </ChartCard>
+          )}
+          <ProcessingTimes rows={g.processing ?? []} />
+          <ProblemFiles rows={g.problems ?? []} />
+        </div>
+      </StatsGroup>
+
+      <StatsGroup id="quality" title="Playback quality" help="Interruptions while players waited for data, by period and by client.">
+        <div className="charts">
+          <ChartCard title={`Buffering ${per}`} sub="Playback interruptions while waiting for data" series={one("stalls", "Events")}
+            table={table([{ key: "stalls", label: "Events", color: COLORS[0] }], count)}>
+            <Columns rows={chartRows} x="label" series={one("stalls", "Events")} fmt={count} tipTitle={tipTitle} />
+          </ChartCard>
+          <ChartCard title={`Player errors ${per}`} sub="Errors the players reported" series={one("errors", "Errors")}
+            table={table([{ key: "errors", label: "Errors", color: COLORS[0] }], count)}>
+            <Columns rows={chartRows} x="label" series={one("errors", "Errors")} fmt={count} tipTitle={tipTitle} />
+          </ChartCard>
+          <ByClient rows={g.clients ?? []} />
+        </div>
+      </StatsGroup>
+
+      <StatsGroup id="requests" title="Launches and requests" help="Activity launches in Discord, and title requests sent to Seerr by result.">
+        <div className="charts">
+          <ChartCard title={`Activity launches ${per}`} series={one("launches", "Launches")} table={table(one("launches", "Launches"), count)}>
+            <Columns rows={chartRows} x="label" series={one("launches", "Launches")} fmt={count} tipTitle={tipTitle} />
+          </ChartCard>
+          <ChartCard title={`Title requests ${per}, by result`} series={REQUEST_SERIES} table={table(REQUEST_SERIES, count)}>
+            {anyRequests ? <Columns rows={chartRows} x="label" series={REQUEST_SERIES} fmt={count} stacked tipTitle={tipTitle} />
+              : <p className="muted">No title was requested in this period.</p>}
+          </ChartCard>
+        </div>
+      </StatsGroup>
     </>
+  );
+}
+
+/** A group of the Statistics page's charts under one heading. */
+function StatsGroup({ id, title, help, children }: { id: string; title: string; help: string; children: React.ReactNode }) {
+  return (
+    <section id={`sec-${id}`} className="stats-group">
+      <div className="stats-group-head">
+        <h2>{title}</h2>
+        <p className="muted small">{help}</p>
+      </div>
+      {children}
+    </section>
+  );
+}
+
+/** How long each processing step took over the period: how often, how many failed, and the median, 95th percentile and longest. */
+function ProcessingTimes({ rows }: { rows: NonNullable<GraphData["processing"]> }) {
+  const order = (k: string) => { const i = PROCESSING_ORDER.indexOf(k); return i < 0 ? 99 : i; };
+  const list = [...rows].sort((a, b) => order(a.kind) - order(b.kind) || Number(a.encode) - Number(b.encode));
+  const ms = (v: number | null) => (v === null ? "—" : duration(v));
+  return (
+    <section className="card chart-card wide">
+      <header className="chart-head">
+        <div>
+          <h3>Processing times</h3>
+          <p className="muted small chart-sub">Each step the server took to prepare titles and their streams in this period. Failed steps are not included in the times.</p>
+        </div>
+      </header>
+      {list.length === 0 ? <p className="muted">No processing steps were recorded in this period.</p> : (
+        <div className="table-wrap">
+          <table className="table wrap-heads">
+            <thead><tr><th>Step</th><th>Mode</th><th className="num">Completed</th><th className="num">Failed</th><th className="num">Median</th>
+              <th className="num">95th percentile</th><th className="num">Longest</th></tr></thead>
+            <tbody>
+              {list.map((r) => (
+                <tr key={`${r.kind}|${r.encode}`}>
+                  <td><span title={PROCESSING_HELP[r.kind]}>{PROCESSING_NAMES[r.kind] ?? r.kind}</span></td>
+                  <td>{r.encode === null ? "—" : r.encode ? "Transcode" : "Remux"}</td>
+                  <td className="num">{count(r.count)}</td>
+                  <td className={`num${r.failed ? " bad-text" : ""}`}>{r.failed ? count(r.failed) : "—"}</td>
+                  <td className="num nowrap">{ms(r.p50Ms)}</td>
+                  <td className="num nowrap">{ms(r.p95Ms)}</td>
+                  <td className="num nowrap">{ms(r.maxMs)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -403,7 +568,7 @@ function Heatmap({ cells }: { cells: NonNullable<GraphData["heat"]> }) {
     <div className="heatmap" role="img" aria-label="Sessions by weekday and hour">
       <div className="heat-grid">
         <span />
-        {Array.from({ length: 24 }, (_, h) => <span key={h} className="heat-hour">{h % 3 === 0 ? String(h).padStart(2, "0") : ""}</span>)}
+        {Array.from({ length: 24 }, (_, h) => <span key={h} className="heat-hour">{h % 6 === 0 ? hourLabel(h) : ""}</span>)}
         {[1, 2, 3, 4, 5, 6, 0].map((w) => (
           <FragmentRow key={w}>
             <span className="heat-day">{WEEKDAYS[w].slice(0, 3)}</span>
@@ -413,7 +578,7 @@ function Heatmap({ cells }: { cells: NonNullable<GraphData["heat"]> }) {
               return (
                 <span key={h} className={`heat-cell${c ? "" : " none"}`}
                   style={c ? { background: `color-mix(in oklab, var(--series-1) ${Math.round(20 + share * 80)}%, var(--surface-2))` } : undefined}
-                  title={`${WEEKDAYS[w]}, ${String(h).padStart(2, "0")}:00–${String(h).padStart(2, "0")}:59 · ${c ? `${count(c.plays)} ${c.plays === 1 ? "session" : "sessions"}, ${hours(c.playedS)}` : "no sessions"}`} />
+                  title={`${WEEKDAYS[w]}, ${hourSpan(h)} · ${c ? `${count(c.plays)} ${c.plays === 1 ? "session" : "sessions"}, ${hours(c.playedS)}` : "no sessions"}`} />
               );
             })}
           </FragmentRow>
@@ -449,21 +614,21 @@ function ByClient({ rows }: { rows: NonNullable<GraphData["clients"]> }) {
       <header className="chart-head">
         <div>
           <h3>Buffering and transcodes by client</h3>
-          <p className="muted small chart-sub">Each viewer's session, by the client they finished it on. Own streams are those made for one viewer's player.</p>
+          <p className="muted small chart-sub">Each viewer's session, by the client it ended on. Dedicated streams are streams created for a single viewer's player.</p>
         </div>
       </header>
       {list.length === 0 ? <p className="muted">No data for this period.</p> : (
         <div className="table-wrap">
-          <table className="table">
+          <table className="table wrap-heads">
             <thead><tr><th>Client</th><th className="num">Sessions</th><th className="num">Watch time</th><th className="num">Buffering</th>
-              <th className="num">Per hour watched</th><th className="num">Own streams</th><th className="num">Transcoded</th></tr></thead>
+              <th className="num">Buffering per hour</th><th className="num">Dedicated streams</th><th className="num">Transcoded</th></tr></thead>
             <tbody>
               {list.map((r) => (
                 <tr key={r.name}>
                   <td>{r.name}</td>
                   <td className="num">{count(r.sessions)}</td>
                   <td className="num nowrap">{hours(r.watchedS)}</td>
-                  <td className="num nowrap">{r.stalls ? `${count(r.stalls)} · ${clock(r.stalledMs / 1000)}` : "None"}</td>
+                  <td className="num nowrap">{r.stalls ? `${count(r.stalls)} · ${duration(r.stalledMs)}` : "None"}</td>
                   <td className="num">{r.watchedS > 0 ? (r.stalls / (r.watchedS / 3600)).toFixed(1) : "—"}</td>
                   <td className="num">{count(r.ownStreams)}</td>
                   <td className={`num${r.transcoded ? " warn-text" : ""}`}>{r.ownStreams ? `${count(r.transcoded)} (${Math.round((r.transcoded / r.ownStreams) * 100)}%)` : "—"}</td>
@@ -477,23 +642,23 @@ function ByClient({ rows }: { rows: NonNullable<GraphData["clients"]> }) {
   );
 }
 
-/** Titles whose streams needed a workaround in this period, the latest first. */
+/** Titles whose streams the server corrected in this period, the latest first. */
 function ProblemFiles({ rows }: { rows: NonNullable<GraphData["problems"]> }) {
   const n = (v: number) => (v ? count(v) : "—");
   return (
     <section className="card chart-card wide">
       <header className="chart-head">
         <div>
-          <h3>Titles that needed a workaround</h3>
-          <p className="muted small chart-sub">Sound that stops before the picture (filled with silence), a stream that ends before the length Plex reports,
-            subtitles burned into the picture, and HDR tone-mapped to SDR. Counted by stream or session.</p>
+          <h3>Titles with stream corrections</h3>
+          <p className="muted small chart-sub">Audio shorter than the video (padded with silence), streams that ended before the duration Plex reports,
+            subtitles burned into the video, and HDR tone-mapped to SDR. Counted per stream or session.</p>
         </div>
       </header>
-      {rows.length === 0 ? <p className="muted">No title needed a workaround in this period.</p> : (
+      {rows.length === 0 ? <p className="muted">No stream corrections were recorded in this period.</p> : (
         <div className="table-wrap">
-          <table className="table">
-            <thead><tr><th>Title</th><th className="num">Short sound</th><th className="num">Ended early</th><th className="num">Subtitles burned in</th>
-              <th className="num">Tone-mapped</th><th className="num">Sessions</th><th>Last</th></tr></thead>
+          <table className="table wrap-heads">
+            <thead><tr><th>Title</th><th className="num">Audio padded</th><th className="num">Ended before duration</th><th className="num">Subtitles burned in</th>
+              <th className="num">HDR tone-mapped</th><th className="num">Sessions</th><th>Last session</th></tr></thead>
             <tbody>
               {rows.map((r) => (
                 <tr key={r.ratingKey}>
@@ -503,7 +668,7 @@ function ProblemFiles({ rows }: { rows: NonNullable<GraphData["problems"]> }) {
                   <td className="num">{n(r.burned)}</td>
                   <td className="num">{n(r.toneMapped)}</td>
                   <td className="num">{count(r.sessions)}</td>
-                  <td className="nowrap">{r.lastPlayId ? <a href={`#history/${r.lastPlayId}`}>{dateTime(r.lastAt)}</a> : dateTime(r.lastAt)}</td>
+                  <td className="nowrap">{r.lastPlayId ? <a href={`#history/${r.lastPlayId}`}>{dayTime(r.lastAt)}</a> : dayTime(r.lastAt)}</td>
                 </tr>
               ))}
             </tbody>
@@ -544,8 +709,9 @@ function TopTable({ rows, cols }: {
 }
 
 /** A small chart over the last 30 days, at the top of another page. */
-export function MiniChart({ kind, onError }: { kind: "plays" | "people" | "data"; onError: (e: unknown) => void }) {
+export function MiniChart({ kind, onError }: { kind: "plays" | "people" | "data" | "servers" | "requests"; onError: (e: unknown) => void }) {
   const { data } = useLoad(() => api.graphs({ days: 30 }), [], onError);
+  const names = usePlaceNames();
   if (!data) return null;
   const more = <>Last 30 days · <a href="#graphs">All statistics</a></>;
   const rows = data.daily.map((d) => ({ ...d, label: dayName(d.day), title: fullDay(d.day) }));
@@ -554,6 +720,28 @@ export function MiniChart({ kind, onError }: { kind: "plays" | "people" | "data"
     return (
       <ChartCard title="Sessions per day" sub={more} series={s} table={<SeriesTable rows={rows} label="Day" labelKey="label" series={s} fmt={count} />}>
         <Columns rows={rows} x="label" series={s} fmt={count} height={140} tipTitle={tipTitle} />
+      </ChartCard>
+    );
+  }
+  if (kind === "servers") {
+    const guild = (id: string | null) => names.guild(id) ?? id ?? "Direct message";
+    const sv = serverSeries(data, guild);
+    const svRows = withExtras(data, data.daily, sv.extra).map((d) => ({ ...d, label: dayName(d.day), title: fullDay(d.day) }));
+    return (
+      <ChartCard title="Watch time per day, by server" sub={more} series={sv.series}
+        table={<SeriesTable rows={svRows} label="Day" labelKey="label" series={sv.series} fmt={(n) => hours(n * 3600)} />}>
+        {sv.series.length === 0 ? <p className="muted">No watch time has been recorded.</p>
+          : <Columns rows={svRows} x="label" series={sv.series} fmt={(n) => hours(n * 3600)} axisFmt={(n) => `${count(n)} h`} decimals stacked
+            height={170} tipTitle={tipTitle} />}
+      </ChartCard>
+    );
+  }
+  if (kind === "requests") {
+    const rqRows = withExtras(data, data.daily, new Map()).map((d) => ({ ...d, label: dayName(d.day), title: fullDay(d.day) }));
+    return (
+      <ChartCard title="Title requests per day, by result" sub={more} series={REQUEST_SERIES}
+        table={<SeriesTable rows={rqRows} label="Day" labelKey="label" series={REQUEST_SERIES} fmt={count} />}>
+        <Columns rows={rqRows} x="label" series={REQUEST_SERIES} fmt={count} stacked height={150} tipTitle={tipTitle} />
       </ChartCard>
     );
   }
@@ -582,5 +770,167 @@ export function MiniChart({ kind, onError }: { kind: "plays" | "people" | "data"
       table={<SeriesTable rows={dataRows} label="Day" labelKey="label" series={s} fmt={inUnit} />}>
       <Columns rows={dataRows} x="label" series={s} fmt={inUnit} axisFmt={unitAxis} decimals stacked height={170} tipTitle={tipTitle} />
     </ChartCard>
+  );
+}
+
+const LOAD_PERIODS: Array<[string, number]> = [["6 hours", 6], ["24 hours", 24], ["7 days", 168], ["30 days", 720]];
+const pctText = (n: number) => `${n.toFixed(n >= 10 ? 0 : 1)}%`;
+
+/**
+ * The server's load over a period, a step at a time: the machine's CPU and
+ * memory, the bot process's share of both, the load average where the
+ * system reports one, the streams, transcodes and viewers at most, and the
+ * server's upload. A time the bot was not running is a gap in each line.
+ */
+export function SystemLoadPanel({ onError }: { onError: (e: unknown) => void }) {
+  const [span, setSpan] = useState(24);
+  const { data, busy } = useLoad(() => api.systemLoad(span), [span], onError);
+  return (
+    <section className="card">
+      <div className="panel-head">
+        <div>
+          <h3>Server load</h3>
+          <p className="muted small">The machine's CPU and memory, the bot process's share, and the streams and viewers it served, recorded each minute.</p>
+        </div>
+        <div className="segmented" role="group" aria-label="Period">
+          {LOAD_PERIODS.map(([label, h]) => (
+            <button key={h} type="button" className={span === h ? "on" : ""} aria-pressed={span === h} onClick={() => setSpan(h)}>{label}</button>
+          ))}
+        </div>
+      </div>
+      {!data ? <p className="empty">{busy ? "Loading…" : "The server load could not be loaded."}</p>
+        : <div className={busy ? "stale" : ""}><SystemLoadBody d={data} /></div>}
+    </section>
+  );
+}
+
+type LoadPoint = SystemLoad["points"][number];
+
+function SystemLoadBody({ d }: { d: SystemLoad }) {
+  if (d.points.length === 0) {
+    return <p className="muted">No server load was recorded in this period. Recording starts when this version of the bot starts.</p>;
+  }
+  // A null row where minutes are missing, so the lines break across them.
+  const rows: Array<Record<string, number | null>> = [];
+  for (const p of d.points) {
+    const prev = rows[rows.length - 1];
+    if (prev && p.at - Number(prev.at) > d.stepMs * 2.5) {
+      rows.push({ at: Number(prev.at) + d.stepMs, cpu: null, bot: null, mem: null, rss: null, load: null, streams: null, encodes: null, viewers: null, sent: null });
+    }
+    rows.push({ at: p.at, cpu: p.cpuPct, bot: p.botCpuPct, mem: p.memPct, rss: p.rssMb, load: p.load1, streams: p.streams, encodes: p.encodes,
+      viewers: p.viewers, sent: p.sentBps / 1e6 });
+  }
+  const vals = (k: keyof LoadPoint) => d.points.map((p) => p[k]).filter((v): v is number => typeof v === "number");
+  const avg = (a: number[]) => (a.length ? a.reduce((s, v) => s + v, 0) / a.length : null);
+  const peakOf = (k: keyof LoadPoint) => {
+    let best: LoadPoint | null = null;
+    for (const p of d.points) if (typeof p[k] === "number" && (!best || (p[k] as number) > (best[k] as number))) best = p;
+    return best ? { v: best[k] as number, at: best.at } : null;
+  };
+  const cpuPeak = peakOf("cpuMaxPct");
+  const botPeak = peakOf("botCpuPct");
+  const memPeak = peakOf("memMaxPct");
+  const rssPeak = peakOf("rssMb");
+  const streamsPeak = peakOf("streams");
+  const sentPeak = peakOf("sentBps");
+  const cpuAvg = avg(vals("cpuPct"));
+  const botAvg = avg(vals("botCpuPct"));
+  const memAvg = avg(vals("memPct"));
+  const rssNow = vals("rssMb").pop() ?? null;
+  const hasLoad = vals("load1").length > 0;
+  const one = (key: string, label: string, color: string = COLORS[0]): Series[] => [{ key, label, color }];
+  const cpu: Series[] = [{ key: "cpu", label: "Machine", color: COLORS[0] }, { key: "bot", label: "Bot process", color: COLORS[1] }];
+  const work: Series[] = [{ key: "viewers", label: "Viewers", color: COLORS[2] }, { key: "streams", label: "Streams", color: COLORS[0] },
+    { key: "encodes", label: "Transcodes", color: COLORS[1] }];
+  const at = (p: { at: number } | null) => (p ? ` on ${dayTime(p.at)}` : "");
+  const tableRows = rows.filter((r) => r.cpu !== null || r.streams !== null).map((r) => ({ ...r, label: dayTime(Number(r.at)) }));
+  const table = (s: Series[], fmt: (n: number) => string) => <SeriesTable rows={tableRows} label="Time" labelKey="label" series={s} fmt={fmt} />;
+  const mb = (n: number) => `${Math.round(n)} MB`;
+  const mbit = (n: number) => `${n >= 10 ? n.toFixed(0) : n.toFixed(1)} Mbps`;
+  const whole = (n: number) => count(Math.round(n));
+  const memGb = (d.memTotalMb / 1000).toFixed(1);
+  return (
+    <>
+      <div className="tiles six">
+        <Tile label="CPU, machine" value={cpuAvg === null ? "—" : pctText(cpuAvg)}
+          sub={`Average · peak ${cpuPeak ? pctText(cpuPeak.v) : "—"}${at(cpuPeak)} · ${d.cores} cores`} />
+        <Tile label="CPU, bot process" value={botAvg === null ? "—" : pctText(botAvg)} sub={`Average · peak ${botPeak ? pctText(botPeak.v) : "—"}${at(botPeak)}`} />
+        <Tile label="Memory, machine" value={memAvg === null ? "—" : pctText(memAvg)}
+          sub={`Average of ${memGb} GB · peak ${memPeak ? pctText(memPeak.v) : "—"}${at(memPeak)}`} />
+        <Tile label="Memory, bot process" value={rssNow === null ? "—" : mb(rssNow)} sub={`Latest · peak ${rssPeak ? mb(rssPeak.v) : "—"}${at(rssPeak)}`} />
+        <Tile label="Most streams at once" value={streamsPeak ? count(streamsPeak.v) : "None"}
+          sub={`${count(Math.max(0, ...vals("encodes")))} transcodes · ${count(Math.max(0, ...vals("viewers")))} viewers at most`} />
+        <Tile label="Peak upload" value={sentPeak && sentPeak.v > 0 ? mbit(sentPeak.v / 1e6) : "None"}
+          sub={sentPeak && sentPeak.v > 0 ? `Averaged over ${Math.round(d.stepMs / 60_000)} min${at(sentPeak)}` : "No upload was recorded in this period"} />
+      </div>
+      <div className="charts">
+        <ChartCard title="CPU usage" sub="Share of all cores, averaged over each step" series={cpu} table={table(cpu, pctText)}>
+          <Lines rows={rows} series={cpu} from={d.from} to={d.to} max={100} fmt={pctText} axisFmt={(n) => `${n}%`} />
+        </ChartCard>
+        <ChartCard title="Memory usage, machine" sub={`Share of ${memGb} GB in use`} series={one("mem", "Machine")}
+          table={table(one("mem", "Machine"), pctText)}>
+          <Lines rows={rows} series={one("mem", "Machine")} from={d.from} to={d.to} max={100} fmt={pctText} axisFmt={(n) => `${n}%`} />
+        </ChartCard>
+        <ChartCard title="Memory usage, bot process" sub="Resident memory, at most in each step" series={one("rss", "Bot process", COLORS[1])}
+          table={table(one("rss", "Bot process", COLORS[1]), mb)}>
+          <Lines rows={rows} series={one("rss", "Bot process", COLORS[1])} from={d.from} to={d.to} fmt={mb} />
+        </ChartCard>
+        <ChartCard title="Streams and viewers" sub="At most in each step" series={work} table={table(work, whole)}>
+          <Lines rows={rows} series={work} from={d.from} to={d.to} fmt={whole} curve="stepAfter" />
+        </ChartCard>
+        <ChartCard title="Server upload" sub="All data the bot's port sent, averaged over each step" series={one("sent", "Upload")}
+          table={table(one("sent", "Upload"), mbit)}>
+          <Lines rows={rows} series={one("sent", "Upload")} from={d.from} to={d.to} fmt={mbit} axisFmt={(n) => `${count(n)} Mbps`} />
+        </ChartCard>
+        {hasLoad && (
+          <ChartCard title="Load average" sub={`One-minute load average; the dashed line marks the number of cores (${d.cores})`}
+            series={one("load", "Load average")} table={table(one("load", "Load average"), (n) => n.toFixed(2))}>
+            <Lines rows={rows} series={one("load", "Load average")} from={d.from} to={d.to} fmt={(n) => n.toFixed(2)} axisFmt={count}
+              threshold={{ value: d.cores, label: `${d.cores} cores` }} />
+          </ChartCard>
+        )}
+      </div>
+    </>
+  );
+}
+
+/**
+ * A user's last 12 weeks, from their sessions: watch time, sessions and
+ * buffering week by week (weeks start on Monday, local time).
+ */
+export function PersonTrends({ plays }: { plays: PersonPlay[] }) {
+  if (plays.length === 0) return null;
+  const now = new Date();
+  const monday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - ((now.getDay() + 6) % 7));
+  const starts = Array.from({ length: 12 }, (_, i) => new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() - (11 - i) * 7).getTime());
+  const rows = starts.map((s, i) => {
+    const e = starts[i + 1] ?? Infinity;
+    const ps = plays.filter((p) => p.startedAt >= s && p.startedAt < e);
+    const d = new Date(s);
+    const sum = (f: (p: PersonPlay) => number) => ps.reduce((a, p) => a + f(p), 0);
+    return {
+      label: `${d.getDate()} ${MONTHS[d.getMonth()]}`, title: `Week of ${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`,
+      sessions: ps.length, watchedH: sum((p) => p.watchedS) / 3600, watchedS: sum((p) => p.watchedS), stalls: sum((p) => p.stalls),
+      stalledS: sum((p) => p.stalledMs) / 1000,
+    };
+  });
+  const watch: Series[] = [{ key: "watchedH", label: "Watch time", color: COLORS[0] }];
+  const sessions: Series[] = [{ key: "sessions", label: "Sessions", color: COLORS[0] }];
+  const buffering: Series[] = [{ key: "stalls", label: "Buffering events", color: COLORS[1] }];
+  return (
+    <div className="charts three">
+      <ChartCard title="Watch time per week" sub="Last 12 weeks" series={watch}
+        table={<SeriesTable rows={rows} label="Week of" labelKey="label" series={[{ key: "watchedS", label: "Watch time", color: COLORS[0] }]} fmt={hours} />}>
+        <Columns rows={rows} x="label" series={watch} fmt={(n) => hours(n * 3600)} axisFmt={(n) => `${count(n)} h`} decimals height={160} tipTitle={tipTitle} />
+      </ChartCard>
+      <ChartCard title="Sessions per week" sub="Last 12 weeks" series={sessions}
+        table={<SeriesTable rows={rows} label="Week of" labelKey="label" series={sessions} fmt={count} />}>
+        <Columns rows={rows} x="label" series={sessions} fmt={count} height={160} tipTitle={tipTitle} />
+      </ChartCard>
+      <ChartCard title="Buffering per week" sub="Last 12 weeks; playback interruptions while waiting for data" series={buffering}
+        table={<SeriesTable rows={rows} label="Week of" labelKey="label" series={buffering} fmt={count} />}>
+        <Columns rows={rows} x="label" series={buffering} fmt={count} height={160} tipTitle={tipTitle} />
+      </ChartCard>
+    </div>
   );
 }

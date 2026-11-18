@@ -1,20 +1,21 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, SignedOut } from "./api";
 import type { HistorySummary, SettingsView, TrimCounts } from "./types";
-import { ago, bytes, dateTime } from "./format";
+import { ago, bytes, dateTime, dayTime } from "./format";
 import { Icon } from "./icons";
+import { SystemLoadPanel } from "./lazy";
 
 /** Each setting's group, by its name: the first that matches. */
 const GROUPS: Array<[string, RegExp, string]> = [
   ["Plex", /^PLEX_/, "The Plex server and account the Activity plays from."],
   ["Discord", /^(DISCORD_|REDIRECT_URI|ALLOWED_ORIGINS|HOST_REQUESTS|PRESENCE)/, "The Discord application, its sign-in, and room behaviour."],
-  ["FFmpeg engine", /^(FFMPEG_|PLAYBACK_ENGINE)/, "The server's own FFmpeg: hardware, presets, subtitles and previews."],
-  ["Playback and quality", /^(DIRECT_STREAM|VIDEO_|AUDIO_|QUALITY|.*BITRATE)/, "What is sent unchanged, and the bitrates used when transcoding."],
-  ["Caches and storage", /^(THUMB_|WARM_|.*CACHE|DATA_|PREVIEW)/, "Where data is kept, how much, and for how long."],
+  ["FFmpeg engine", /^(FFMPEG_|PLAYBACK_ENGINE)/, "FFmpeg on this server: hardware acceleration, presets, subtitles and seek previews."],
+  ["Playback and quality", /^(DIRECT_STREAM|VIDEO_|AUDIO_|QUALITY|.*BITRATE)/, "Direct play and direct stream rules, and transcoding bitrates."],
+  ["Caches and storage", /^(THUMB_|WARM_|.*CACHE|DATA_|PREVIEW)/, "Storage locations, size limits and retention."],
   ["Integrations", /^(SEERR_|TMDB_|TVDB_|QBT_|TRAKT_)/, "Seerr requests, TMDB and TVDB metadata, and the qBittorrent manager."],
   ["Dashboard", /^ADMIN_/, "The Theater Dashboard, its port and password."],
   ["Logging", /^(LOG_|DEBUG)/, "Log files and their detail."],
-  ["Server", /^(PORT|NODE_ENV|SESSION_|HOST|TRUST_|TZ)/, "The Activity's own web server."],
+  ["Server", /^(PORT|NODE_ENV|SESSION_|HOST|TRUST_|TZ)/, "The web server that hosts the Activity."],
 ];
 const groupOf = (name: string) => GROUPS.find(([, re]) => re.test(name))?.[0] ?? "Other";
 
@@ -47,17 +48,18 @@ export function Settings({ onError }: { onError: (e: unknown) => void }) {
     <>
       <div className="page-head">
         <h1>System</h1>
-        <p className="muted">The server's status, its history database, and its configuration.</p>
+        <p className="muted">The server's status and load, its history database, and its configuration.</p>
       </div>
 
       <div className="stats">
         <Fact icon="check" label="Version" value={String(sys.version ?? "—")} sub={`Node.js ${String(sys.node ?? "—")}`} />
         <Fact icon="clock" label="Uptime" value={sys.uptimeS === null || sys.uptimeS === undefined ? "—" : ago(Number(sys.uptimeS))}
-          sub={sys.startedAt ? `Started ${dateTime(String(sys.startedAt))}` : undefined} />
+          sub={sys.startedAt ? `Started ${dayTime(String(sys.startedAt))}` : undefined} />
         <Fact icon="pulse" label="Memory" value={sys.rssMB === null || sys.rssMB === undefined ? "—" : `${sys.rssMB} MB`}
           sub={sys.heapUsedMB !== null && sys.heapUsedMB !== undefined ? `JavaScript heap ${sys.heapUsedMB} MB` : undefined} />
         <Fact icon="caches" label="Platform" value={String(sys.platform ?? "—")} sub={`Process ${String(sys.pid ?? "—")}`} />
       </div>
+      <SystemLoadPanel onError={onError} />
       <section className="card">
         <h3>Paths</h3>
         <dl className="grid">
@@ -161,7 +163,7 @@ function HistoryFile({ onError }: { onError: (e: unknown) => void }) {
           {summary.plays} sessions ({summary.open} in progress), {summary.events} timeline events,
           {" "}{summary.usage} launches and joins, {summary.requests} requests, {summary.people} users
         </dd>
-        <dt>Period covered</dt><dd>{summary.first ? `${dateTime(summary.first)} to ${dateTime(summary.last)}` : "No data yet"}</dd>
+        <dt>Period covered</dt><dd>{summary.first ? `${dayTime(summary.first)} – ${dayTime(summary.last)}` : "No data yet"}</dd>
       </dl>
 
       <h4>Backup</h4>
@@ -202,7 +204,7 @@ function HistoryFile({ onError }: { onError: (e: unknown) => void }) {
                   api.trim(n).then((r) => {
                     setPreview(null);
                     setDone(`Deleted ${r.plays} sessions, ${r.events} timeline events, ${r.usage} launches and joins, ${r.requests} requests `
-                      + `and ${r.people} users. The file went from ${bytes(r.bytesBefore)} to ${bytes(r.bytesAfter)}.`);
+                      + `and ${r.people} users. The database file was reduced from ${bytes(r.bytesBefore)} to ${bytes(r.bytesAfter)}.`);
                     return load();
                   }).catch(fail).finally(() => setBusy(false));
                 }}>{busy ? "Deleting…" : "Delete permanently"}</button>

@@ -58,15 +58,15 @@ check("the room waits for the host's picture, and says after what",
     eventText(ev("room waited", { ms: 1_500, why: "a seek" }, null)),
     eventText(ev("room waited", { ms: 2_000, why: "something new" }, null)),
     eventText(ev("room waited", { ms: 2_000 }, null))],
-  ["Playback waited 4.0 s for the host's video after the host changed the audio",
+  ["Playback waited 4 s for the host's video after the host changed the audio",
     "Playback waited 1.5 s for the host's video after a seek",
-    "Playback waited 2.0 s for the host's video (something new)",
-    "Playback waited 2.0 s for the host's video"]);
+    "Playback waited 2 s for the host's video (something new)",
+    "Playback waited 2 s for the host's video"]);
 const start = ev("loaded at start", { ms: 3_000 });
 const stall = ev("buffering", { ms: 3_000 });
 check("loading the start is said as that, among loading and errors, and not marked as a problem",
   [eventText(start), groupOf(start), eventTone(start), eventText(stall), eventTone(stall)],
-  ["robin's player took 3.0 s to load at the start", "problems", "", "robin was buffering for 3.0 s", "warn"]);
+  ["Initial load for robin: 3 s", "problems", "", "Buffering for robin: 3 s", "warn"]);
 
 // 17 November: a skip of the intro was "seeked"; how a title ended was
 // "playback was stopped" whatever had happened; the host's subtitles were
@@ -102,7 +102,7 @@ check("how a session ended: finished, closed, the next episode, a co-host's requ
 check("reaching the end: of the title, or of a stream shorter than Plex says, which is playback",
   [eventText(ev("reached the end", null)), eventText(ev("reached the end", { early: true, breakAtS: 7_002.5 })), groupOf(ev("reached the end", null))],
   ["robin reached the end of the title",
-    "robin reached the end of the stream at 1:56:42, before the length Plex reports; playback was ended there", "playback"]);
+    "robin reached the end of the stream at 1:56:42, before the duration Plex reports; playback ended there", "playback"]);
 check("the host's subtitles: theirs, and whose followed",
   [eventText(ev("subtitles", { from: 0, to: 3, byHost: true }, "alex"), ctx), eventText(ev("subtitles", { from: 0, to: 3, host: "alex" }, "sam"), ctx)],
   ["alex (host) changed the subtitles from off to English (SRT)", "sam's subtitles changed from off to English (SRT), following alex (host)"]);
@@ -213,23 +213,23 @@ check("each way the host changes, said for whoever got it and whoever had it",
     roleEv("sam", "viewer", "co-host", { why: "co-host given", by: "alex", target: "sam" }),
     roleEv("sam", "co-host", "viewer", { why: "co-host removed", by: "alex", target: "sam" }),
     roleEv("sam", "viewer", "host", {})],
-  ["sam became host: alex handed it over", "alex handed host to sam and is now co-host",
-    "sam requested host and alex accepted", "alex accepted sam's request for host and is now co-host",
-    "sam requested host and got it: alex didn't answer in time (away from the Discord window)",
-    "alex didn't answer sam's request for host in time, so it passed to them; alex is now co-host",
-    "alex took host back from sam", "sam is now co-host: alex took host back",
-    "sam became host when alex left", "sam became host: the host didn't come back in time",
-    "sam is a viewer again: alex reconnected in time and is host",
-    "alex made sam a co-host", "alex removed sam as co-host", "sam became host"]);
-check("  coming in as host: back in time, or nobody else was",
+  ["sam became host: transferred by alex", "alex transferred host to sam and became co-host",
+    "sam became host: alex approved the request", "alex approved sam's host request and became co-host",
+    "sam became host: alex did not respond to the request in time (away from Discord)",
+    "alex did not respond to sam's host request in time; host transferred to sam and alex became co-host",
+    "alex reclaimed host from sam", "sam became co-host: alex reclaimed host",
+    "sam became host after alex left the session", "sam became host: the previous host did not reconnect in time",
+    "sam returned to a viewer: alex reconnected in time and resumed as host",
+    "alex granted co-host to sam", "alex revoked co-host from sam", "sam became host"]);
+check("  coming in as host: back in time, or no other host present",
   [eventText(ev("came back", { role: "host", why: "host back" }, "alex")), eventText(ev("joined", { role: "host", why: "nobody was host" }, "sam"))],
-  ["alex reconnected and is host again", "sam joined as host: nobody else was host"]);
+  ["alex reconnected and resumed as host", "sam joined as host: no other host was present"]);
 check("  its details: how, and the hosts either side; a co-host's, who gave it",
   [eventDetails(ev("role", { from: "host", to: "co-host", why: "handed over", by: "alex", target: "sam" }, "alex")),
     eventDetails(ev("role", { from: "viewer", to: "co-host", why: "co-host given", by: "alex", target: "sam" }, "sam")),
     eventDetails(ev("role", { from: "viewer", to: "host", why: "request not answered", by: "alex", target: "sam", away: true }, "sam")).at(-1)],
-  [[["From", "Host"], ["To", "Co-host"], ["How", "The host handed it over"], ["Host before", "alex"], ["Host after", "sam"]],
-    [["From", "Viewer"], ["To", "Co-host"], ["How", "Given by the host"], ["By", "alex"]],
+  [[["From", "Host"], ["To", "Co-host"], ["How", "Transferred by the host"], ["Host before", "alex"], ["Host after", "sam"]],
+    [["From", "Viewer"], ["To", "Co-host"], ["How", "Granted by the host"], ["By", "alex"]],
     ["Host away from Discord", "Yes"]]);
 
 console.log("\n— requests for host, and a title's short sound —");
@@ -237,18 +237,18 @@ check("asked, declined, and ended unanswered: who and why",
   [eventText(ev("asked for host", { host: "alex", away: true, waitS: 30 })), eventText(ev("asked for host", { host: "alex", away: false, waitS: 15 })),
     eventText(ev("request declined", { host: "alex" })),
     eventText(ev("request ended", { host: "alex", why: "asker left" })), eventText(ev("request ended", { host: "alex", why: "host changed" }))],
-  ["robin requested host from alex, who was away from the Discord window", "robin requested host from alex",
+  ["robin requested host from alex (away from Discord)", "robin requested host from alex",
     "alex declined robin's request for host",
-    "robin's request for host ended: they left before alex answered", "robin's request for host ended: the host role moved before alex answered"]);
+    "robin's host request was withdrawn: robin left before alex responded", "robin's host request was withdrawn: host changed before alex responded"]);
 check("  in People; the short sound in Streams",
   ["asked for host", "request declined", "request ended", "short sound"].map((k) => groupOf(ev(k, {}))), ["people", "people", "people", "streams"]);
-check("  the time the host had to answer, as a time",
-  eventDetails(ev("asked for host", { host: "alex", away: true, waitS: 30 })).find(([l]) => l === "Time to answer"), ["Time to answer", "30 s"]);
-check("short sound: where the sound and the picture end",
+check("  the time the host had to respond, as a time",
+  eventDetails(ev("asked for host", { host: "alex", away: true, waitS: 30 })).find(([l]) => l === "Time to respond"), ["Time to respond", "30 s"]);
+check("short sound: where the audio and the video end",
   [eventText(ev("short sound", { soundEndsS: 5400, pictureEndsS: 5460, ratingKey: "173916" }, null)),
     eventDetails(ev("short sound", { soundEndsS: 5400, pictureEndsS: 5460, ratingKey: "173916" }, null))],
-  ["The sound stops at 1:30:00, before the picture ends at 1:31:00: it was read on its own and filled with silence to the end",
-    [["Sound ends at", "1:30:00"], ["Picture ends at", "1:31:00"], ["Plex item", "173916"]]]);
+  ["The audio ends at 1:30:00, before the video ends at 1:31:00; the audio was processed separately and padded with silence to the end of the video",
+    [["Audio ends at", "1:30:00"], ["Video ends at", "1:31:00"], ["Plex item", "173916"]]]);
 
 console.log("\n— a session's cards: away, pauses, loading —");
 const by = (kind: string, userId: string, at: number, detail: Record<string, unknown> | null = null, posS: number | null = null, username = userId === "1" ? "robin" : "sam"): PlayEvent =>
@@ -284,14 +284,14 @@ check("  what they watched by it: transcoded until the move, direct after; a jum
   [{ from: 0, to: 30, decision: "transcode" }, { from: 30, to: 40, decision: "copy" }, { from: 100, to: 110, decision: "copy" }]);
 
 console.log("\n— live: sync, encoding, logs —");
-check("distance from the room, said", [drift(0.3), drift(2.44), drift(-3)], ["in sync", "2.4 s ahead", "3.0 s behind"]);
-check("encoding: its speed lately, how far ahead, what it uses",
+check("sync offset, said", [drift(0.3), drift(2.44), drift(-3)], ["in sync", "2.4 s ahead", "3.0 s behind"]);
+check("processing: its speed now, how far ahead of playback, what it uses",
   [progressText({ encode: true, state: "making", speedX: 3, recentX: 4.2, aheadS: 190, cores: 1.2, gpu: [{ engine: "video", share: 0.34 }] }),
     progressText({ encode: true, state: "making", speedX: 2, recentX: null, aheadS: 40, cores: 2, gpu: [] }),
     progressText({ encode: false, state: "made", speedX: 9, recentX: null, aheadS: 0, cores: null, gpu: null })],
-  ["Encoding at 4.2× real time · 3:10 ahead of the watcher · GPU video 34% · CPU 1.2 cores",
-    "Encoding at 2.0× real time · 0:40 ahead of the watcher · no GPU (CPU encode) · CPU 2 cores",
-    "Copying done: made to the end of the file"]);
+  ["Transcode running at 4.2× real time · 3:10 ahead of playback · GPU video 34% · CPU 1.2 cores",
+    "Transcode running at 2.0× real time · 0:40 ahead of playback · No GPU (CPU encoding) · CPU 2 cores",
+    "Remux complete: end of file reached"]);
 const day = Date.UTC(2026, 10, 18, 23, 50);
 check("logs for a session: its lines in its UTC day's file, both days' over midnight",
   [sessionLogsHref(day - 3_600_000, day).map(decodeURIComponent), sessionLogsHref(day, day + 1_800_000).map(decodeURIComponent)],

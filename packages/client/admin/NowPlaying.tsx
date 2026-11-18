@@ -1,15 +1,15 @@
 import { useEffect, useState } from "react";
 import type { Client, Overview, PlayDetail, Room, Stream } from "./types";
 import { api } from "./api";
-import { drift, SessionChart } from "./timeline";
-import { ago, bytes, clock, dateTime, quality, rate, timeOfDay, zoneLabel } from "./format";
-import { BufferingCell, bufferingTone, DataCell, DecisionBadge, PlaceName } from "./parts";
+import { drift, SessionTimeline } from "./timeline";
+import { ago, bytes, clock, dayTime, duration, quality, rate, zoneLabel } from "./format";
+import { BlockHead, BufferingCell, bufferingTone, DataCell, DecisionBadge, decisionOf, PlaceName } from "./parts";
 import { switchedText, trackName } from "./events";
 import { clientName, formatsText } from "./clients";
 import { StreamCard, type StreamInfo } from "./streams";
 import { Icon } from "./icons";
 import { Poster, titleLine, useTitles } from "./titles";
-import { Avatar, bps, FlowChart, pct, Progress, ShareList, SOURCES, Spark, SplitBar, Stat, type FlowPoint } from "./viz";
+import { Avatar, bps, pct, Progress, ShareList, Spark, SplitBar, Stat, type FlowPoint } from "./viz";
 
 
 type State = "playing" | "paused" | "waiting" | "idle";
@@ -48,7 +48,7 @@ const listed = (names: string[]) => (names.length < 2 ? names.join("") : `${name
 /** A room everybody has left, in a sentence: who it is kept for. */
 function heldNote(room: Room): string {
   const host = known(room, room.heldFor?.hostUserId ?? room.discord.hostUserId);
-  return `All viewers have left. The session is being held briefly so that ${host ?? "the host"} can resume where they left off.`;
+  return `All viewers have left. The session is retained briefly so that ${host ?? "the host"} can resume from the same position.`;
 }
 
 /** Viewers who left a stream of their own a moment ago: by name, or by how many when a name isn't known. */
@@ -56,7 +56,7 @@ function awayNote(room: Room): string {
   const n = room.away.length;
   const names = room.away.map((a) => known(room, a.userId)).filter((name): name is string => !!name);
   const who = names.length === n ? listed(names) : n === 1 ? "A viewer" : `${n} viewers`;
-  return `${who} left recently. ${n === 1 ? "Their stream is" : "Their streams are"} being held briefly in case they return.`;
+  return `${who} disconnected recently. ${n === 1 ? "Their stream is" : "Their streams are"} retained briefly in case they reconnect.`;
 }
 
 /** What a room's players need each second to keep playing: each watched stream's bitrate, once a viewer. Nothing while paused. */
@@ -98,12 +98,14 @@ const forS = (ms: number | null | undefined) => (ms ? ` · ${Math.round(ms / 100
  * the start or after a seek is not buffering, and neither is a player with
  * under 15 seconds in hand that is still playing (the room's "loading").
  */
-function status(c: Client): { text: string; tone: string } {
+function status(c: Client, idle = false): { text: string; tone: string } {
   if (!c.connected) return { text: "Disconnected", tone: "bad" };
+  // No title selected: nothing to watch, whatever the player says.
+  if (idle) return { text: c.away ? "Away" : "Browsing the library", tone: "muted" };
   if (c.away) return { text: "Away", tone: "muted" };
   const p = c.player;
   if (p?.stall === "buffering") return { text: `Buffering${forS(p.sinceMs)}`, tone: "warn" };
-  if (p?.stall === "start") return { text: `Starting${forS(p.sinceMs)}`, tone: "muted" };
+  if (p?.stall === "start") return { text: `Loading at start${forS(p.sinceMs)}`, tone: "muted" };
   if (p?.stall === "seek") return { text: `Loading after seek${forS(p.sinceMs)}`, tone: "muted" };
   // Not recorded: only the room's word, that they have under 15 s in hand.
   if (p === undefined && c.loading) return { text: "Loading", tone: "muted" };
@@ -111,15 +113,11 @@ function status(c: Client): { text: string; tone: string } {
     return { text: "Out of sync", tone: "warn" };
   }
   if (c.watching) return { text: "Watching", tone: "good" };
-  return { text: "Browsing", tone: "muted" };
+  return { text: "Browsing the library", tone: "muted" };
 }
 
 /** Past this far from the room a player corrects itself (client Player.tsx DRIFT_THRESHOLD_S): out of sync. */
 const OUT_OF_SYNC_S = 2;
-
-/** Up to three viewers' lines get a colour each; the rest share one. */
-const LINE_COLORS = ["var(--series-1)", "var(--series-2)", "var(--series-3)"];
-const lineColor = (i: number) => LINE_COLORS[i] ?? "var(--muted)";
 
 function SyncCell({ c }: { c: Client }) {
   const p = c.player;
@@ -141,95 +139,12 @@ function AheadCell({ c }: { c: Client }) {
   );
 }
 
-/** Each viewer's distance from the room and what their player has downloaded ahead, over the last ten minutes. */
-function SyncCharts({ room }: { room: Room }) {
-  const lines = room.clients.map((c, i) => ({ id: c.userId, name: c.username ?? c.userId, color: lineColor(i), host: c.role === "host",
-    health: c.player?.health ?? [] })).filter((l) => l.health.length > 1);
-  if (lines.length === 0) return null;
-  const drifting = lines.filter((l) => !l.host && l.health.some((h) => typeof h[1] === "number"));
-  return (
-    <div className="session-block">
-      <div className="panel-head">
-        <h4>Sync and buffer, last 10 minutes</h4>
-        <ul className="legend">{lines.map((l) => <li key={l.id}><span className="swatch" style={{ background: l.color }} />{l.name}</li>)}</ul>
-      </div>
-      <div className="sync-charts">
-        {drifting.length > 0 && (
-          <LiveLines title="Distance from the room" lines={drifting.map((l) => ({ ...l, points: l.health.map((h) => [h[0], h[1]] as [number, number | null]) }))}
-            fmt={(v) => (Math.abs(v) < 0.05 ? "0 s" : `${v > 0 ? "+" : "−"}${Math.abs(v).toFixed(1)} s`)} band={OUT_OF_SYNC_S} symmetric />
-        )}
-        <LiveLines title="Downloaded ahead" lines={lines.map((l) => ({ ...l, points: l.health.map((h) => [h[0], h[2]] as [number, number | null]) }))}
-          fmt={(v) => clock(v)} />
-      </div>
-    </div>
-  );
-}
-
-/** A few lines over the last minutes, with a hover readout: Now Playing's sync and buffer charts. */
-function LiveLines({ title, lines, fmt, band, symmetric = false }: {
-  title: string;
-  lines: Array<{ id: string; name: string; color: string; points: Array<[number, number | null]> }>;
-  fmt: (v: number) => string;
-  /** Shaded either side of 0: in sync. */
-  band?: number;
-  symmetric?: boolean;
-}) {
-  const [hover, setHover] = useState<number | null>(null);
-  const W = 1000;
-  const H = 110;
-  const ts = lines.flatMap((l) => l.points.map((p) => p[0]));
-  const vs = lines.flatMap((l) => l.points.map((p) => p[1]).filter((v): v is number => v !== null));
-  const t0 = Math.min(...ts);
-  const t1 = Math.max(t0 + 1000, ...ts);
-  const top = Math.max(band ?? 1, ...vs.map((v) => (symmetric ? Math.abs(v) : v))) * 1.15;
-  const lo = symmetric ? -top : 0;
-  const x = (t: number) => ((t - t0) / (t1 - t0)) * W;
-  const y = (v: number) => H - ((v - lo) / (top - lo)) * H;
-  const path = (pts: Array<[number, number | null]>) => {
-    let d = "";
-    let gap = true;
-    for (const [t, v] of pts) {
-      if (v === null) { gap = true; continue; }
-      d += `${gap ? "M" : "L"}${x(t).toFixed(1)},${y(v).toFixed(1)}`;
-      gap = false;
-    }
-    return d;
-  };
-  const at = hover === null ? null : t0 + (t1 - t0) * hover;
-  const nearest = (pts: Array<[number, number | null]>, t: number) =>
-    pts.reduce<[number, number | null] | null>((b, p) => (!b || Math.abs(p[0] - t) < Math.abs(b[0] - t) ? p : b), null);
-  return (
-    <div className="live-lines">
-      <div className="live-lines-head"><span>{title}</span><span className="muted small">{fmt(top)}{symmetric ? ` / ${fmt(-top)}` : ""}</span></div>
-      <div className="live-plot" onPointerMove={(e) => {
-        const r = e.currentTarget.getBoundingClientRect();
-        setHover(Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)));
-      }} onPointerLeave={() => setHover(null)}>
-        <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" role="img" aria-label={`${title}, last 10 minutes`}>
-          {band !== undefined && <rect x={0} width={W} y={y(band)} height={Math.max(0, y(symmetric ? -band : 0) - y(band))} className="live-band" />}
-          <line x1={0} x2={W} y1={y(0)} y2={y(0)} className="live-zero" />
-          {lines.map((l) => <path key={l.id} d={path(l.points)} style={{ stroke: l.color }} className="live-line" />)}
-          {hover !== null && <line x1={hover * W} x2={hover * W} y1={0} y2={H} className="flow-cross" />}
-        </svg>
-        {at !== null && (
-          <div className={`chart-tip live-tip${hover! > 0.6 ? " left" : ""}`} style={{ left: `${hover! * 100}%` }}>
-            <div className="tip-title">{timeOfDay(at)}</div>
-            {lines.map((l) => {
-              const p = nearest(l.points, at);
-              return p && p[1] !== null ? (
-                <div key={l.id} className="tip-row"><span className="tip-key" style={{ background: l.color }} /><strong>{fmt(p[1])}</strong><span className="muted">{l.name}</span></div>
-              ) : null;
-            })}
-          </div>
-        )}
-      </div>
-      <div className="flow-axis"><span>{timeOfDay(t0)}</span><span>Now</span></div>
-    </div>
-  );
-}
-
-/** The session so far, as History draws it, fetched again every 15 seconds. */
-function LiveOverview({ room, tracks, durationS }: { room: Room; tracks: Record<string, string> | null; durationS: number | null }) {
+/**
+ * The session's timeline, as History draws it, fetched again every 10
+ * seconds: playback, position, streams, viewers, the data delivered and each
+ * player's sync and buffer on one time axis, opening on the last half hour.
+ */
+function LiveTimeline({ room, tracks, durationS }: { room: Room; tracks: Record<string, string> | null; durationS: number | null }) {
   const [data, setData] = useState<PlayDetail | null>(null);
   const playId = room.playId ?? null;
   useEffect(() => {
@@ -237,17 +152,19 @@ function LiveOverview({ room, tracks, durationS }: { room: Room; tracks: Record<
     let gone = false;
     const load = () => api.play(playId).then((d) => { if (!gone) setData(d); }).catch(() => {});
     void load();
-    const t = setInterval(load, 15_000);
+    const t = setInterval(load, 10_000);
     return () => { gone = true; clearInterval(t); };
   }, [playId]);
-  if (!playId || !data || data.play.id !== playId) return null;
+  if (!playId) return null;
   return (
     <div className="session-block">
-      <div className="panel-head">
-        <h4>Session so far</h4>
-        <a className="small" href={`#history/${playId}`}>Full timeline →</a>
-      </div>
-      <SessionChart data={data} durationS={durationS} ctx={{ tracks, streams: data.streams }} compact />
+      <BlockHead title="Session timeline"
+        help="Playback, position, streams, viewers, data delivered and player health on one time axis, refreshed every 10 seconds. Hover over or tap the chart for the values at that moment.">
+        <a className="small" href={`#history/${playId}`}>Open in History →</a>
+      </BlockHead>
+      {data && data.play.id === playId
+        ? <SessionTimeline data={data} durationS={durationS} ctx={{ tracks, streams: data.streams }} live />
+        : <p className="muted">Loading the session timeline…</p>}
     </div>
   );
 }
@@ -265,14 +182,14 @@ function Viewers({ room, tracks }: { room: Room; tracks: Record<string, string> 
         <thead>
           <tr>
             <th>Viewer</th><th>Status</th><th>Stream</th>
-            {sampled && <><th>Sync</th><th>Downloaded ahead</th></>}
-            {recorded && <><th>Watched</th><th>Data received</th><th className="num">Sent to viewers</th><th>Buffering</th></>}
+            {sampled && <><th>Sync offset</th><th>Forward buffer</th></>}
+            {recorded && <><th>Watched</th><th>Data received</th><th className="num">Sent to peers</th><th>Buffering</th></>}
             <th aria-label="Details" />
           </tr>
         </thead>
         <tbody>
           {room.clients.map((c) => {
-            const st = status(c);
+            const st = status(c, !room.ratingKey);
             const on = c.variantKey ? streamOf.get(c.variantKey) : undefined;
             const shown = open === c.userId;
             return (
@@ -300,26 +217,42 @@ function Viewers({ room, tracks }: { room: Room; tracks: Record<string, string> 
                 {shown && (
                   <tr className="detail-row">
                     <td colSpan={(recorded ? 8 : 4) + (sampled ? 2 : 0)}>
-                      <dl className="grid">
-                        <dt>Discord user ID</dt><dd className="mono">{c.userId}</dd>
-                        <dt>Joined</dt><dd>{dateTime(c.joinedAt)} ({ago((Date.now() - c.joinedAt) / 1000)} ago)</dd>
-                        <dt>Stream key</dt><dd className="mono">{c.variantKey ?? "—"}</dd>
-                        <dt>Quality limit</dt><dd>{quality(c.quality)}</dd>
-                        <dt>Subtitle track</dt>
-                        <dd>{trackName({ tracks }, c.subtitleStreamId, "Off")}{c.subtitleStreamId ? <> <span className="mono muted">{c.subtitleStreamId}</span></> : null}</dd>
-                        <dt>Supported formats</dt>
-                        <dd>{formatsText(c.caps, c.av1Encode)}</dd>
-                        <dt>Client</dt><dd>{clientName(c.device)}</dd>
-                        {c.device && <><dt>User agent</dt><dd className="mono small">{c.device}</dd></>}
+                      <div className="detail-groups">
+                        <section className="detail-group">
+                          <h5>User and client</h5>
+                          <dl className="grid">
+                            <dt>Discord user ID</dt><dd className="mono">{c.userId}</dd>
+                            <dt>Joined</dt><dd>{dayTime(c.joinedAt)} ({ago((Date.now() - c.joinedAt) / 1000)} ago)</dd>
+                            <dt>Client</dt><dd>{clientName(c.device)}</dd>
+                            <dt>Supported formats</dt><dd>{formatsText(c.caps, c.av1Encode)}</dd>
+                            {c.device && <><dt>User agent</dt><dd className="mono small">{c.device}</dd></>}
+                          </dl>
+                        </section>
+                        <section className="detail-group">
+                          <h5>Playback</h5>
+                          <dl className="grid">
+                            <dt>Stream key</dt><dd className="mono">{c.variantKey ?? "—"}</dd>
+                            <dt>Quality limit</dt><dd>{quality(c.quality)}</dd>
+                            <dt>Subtitle track</dt>
+                            <dd>{trackName({ tracks }, c.subtitleStreamId, "Off")}{c.subtitleStreamId ? <> <span className="mono muted">{c.subtitleStreamId}</span></> : null}</dd>
+                            {c.data && <>
+                              <dt>Buffering</dt><dd>{c.data.stalls ? `${c.data.stalls} ${c.data.stalls === 1 ? "event" : "events"}, ${duration(c.data.stalledMs)} in total` : "None"}</dd>
+                              <dt>Player errors</dt><dd>{c.data.errors || "None"}</dd>
+                            </>}
+                          </dl>
+                        </section>
                         {c.data && (
-                          <>
-                            <dt>Received from the server</dt><dd>{bytes(c.data.botBytes)}</dd>
-                            <dt>Received from Discord's cache</dt><dd>{bytes(Math.min(c.data.edgeHitBytes, c.data.httpBytes))}</dd>
-                            <dt>Received from other viewers</dt><dd>{bytes(c.data.p2pBytes)}</dd>
-                            <dt>Sent to other viewers</dt><dd>{bytes(c.data.upBytes)}</dd>
-                          </>
+                          <section className="detail-group">
+                            <h5>Data</h5>
+                            <dl className="grid">
+                              <dt>Received from the server</dt><dd>{bytes(c.data.botBytes)}</dd>
+                              <dt>Received from Discord's cache</dt><dd>{bytes(Math.min(c.data.edgeHitBytes, c.data.httpBytes))}</dd>
+                              <dt>Received from other viewers</dt><dd>{bytes(c.data.p2pBytes)}</dd>
+                              <dt>Sent to other viewers</dt><dd>{bytes(c.data.upBytes)}</dd>
+                            </dl>
+                          </section>
                         )}
-                      </dl>
+                      </div>
                     </td>
                   </tr>
                 )}
@@ -341,8 +274,6 @@ function Session({ room, durationS, sub, tracks }: { room: Room; durationS: numb
   const watching = room.clients.filter((c) => c.connected && c.watching).length;
   const totals = sessionTotals(room);
   const recorded = room.clients.some((c) => c.data);
-  const points = (room.flow?.points ?? []) as FlowPoint[];
-  const now = points.length ? points[points.length - 1] : null;
   const required = requiredBps(room);
   const health = bufferingTone(totals);
   if (state === "idle") {
@@ -379,82 +310,58 @@ function Session({ room, durationS, sub, tracks }: { room: Room; durationS: numb
           </div>
           <Progress positionS={room.positionS} durationS={durationS} state={state} />
           <Facts room={room} watching={watching} />
-          <div className="session-kpis">
+          <div className={`session-kpis${recorded ? " four" : ""}`}>
             <div className="kpi"><span className="kpi-label">Streams</span><span className="kpi-value">{room.streams.length}</span>
-              <span className="kpi-sub">{room.streams.filter((s) => s.decision === "transcode").length} transcoding</span></div>
+              <span className="kpi-sub"><DeliveryCounts streams={room.streams} /></span></div>
             <div className="kpi"><span className="kpi-label">Required bitrate</span><span className="kpi-value">{required ? bps(required) : "—"}</span>
               <span className="kpi-sub">{room.playing ? "All viewers combined" : "Paused"}</span></div>
             {recorded && (
               <>
                 <div className="kpi"><span className="kpi-label">Data delivered</span><span className="kpi-value">{bytes(totals.total)}</span>
-                  <span className="kpi-sub">{pct(totals.cache + totals.peers, totals.total)}% offloaded from the server</span></div>
+                  <SplitBar server={totals.server} cache={totals.cache} peers={totals.peers} legend="compact" /></div>
                 <div className={`kpi ${health}`}><span className="kpi-label">Buffering</span>
                   <span className="kpi-value">{totals.stalls === 0 ? "None" : `${totals.stalls} ${totals.stalls === 1 ? "event" : "events"}`}</span>
-                  <span className="kpi-sub">{totals.stalls ? `${clock(totals.stalledMs / 1000)} in total` : "No interruptions"}{totals.errors ? ` · ${totals.errors} errors` : ""}</span></div>
+                  <span className="kpi-sub">{totals.stalls ? `${duration(totals.stalledMs)} in total` : "No interruptions"}{totals.errors ? ` · ${totals.errors} errors` : ""}</span></div>
               </>
             )}
           </div>
         </div>
-        {recorded && (
-          <div className="session-flow">
-            <div className="panel-head">
-              <h4>Delivery, last 10 minutes</h4>
-              <ul className="legend">
-                {SOURCES.map((s) => <li key={s.key}><span className="swatch" style={{ background: s.color }} />{s.label}</li>)}
-                <li><span className="swatch dashed" />Required</li>
-              </ul>
-            </div>
-            <div className="flow-now">
-              {SOURCES.map((s, i) => (
-                <span key={s.key}><span className="swatch" style={{ background: s.color }} /><strong>{bps(now ? now[i + 1] : 0)}</strong></span>
-              ))}
-              {required > 0 && <span className="muted">Required: {bps(required)}</span>}
-            </div>
-            <FlowChart points={points} requiredBps={required || null} stepS={room.flow?.stepS ?? 10} />
-          </div>
-        )}
       </div>
 
-      {recorded && (
-        <div className="session-block">
-          <h4>Data sources for this session</h4>
-          <SplitBar server={totals.server} cache={totals.cache} peers={totals.peers} />
-        </div>
-      )}
-
-      {recorded && (room.shares?.length ?? 0) > 0 && (
-        <div className="session-block">
-          <h4>Peer-to-peer sharing for this session</h4>
-          <ShareList shares={room.shares ?? []} nameOf={(id) => nameOf(room, id)} />
-        </div>
-      )}
-
-      {room.streams.length > 0 && (
-        <div className="session-block">
-          <h4>Streams ({room.streams.length})</h4>
-          {room.streams.map((s, i) => <StreamCard key={s.variantKey} s={infoOf(room, s, i + 1, tracks)} />)}
+      {(room.held || room.away.length > 0) && (
+        <div className="session-block alerts">
+          {room.held && <p className="note">{heldNote(room)}</p>}
+          {!room.held && room.away.length > 0 && <p className="note">{awayNote(room)}</p>}
         </div>
       )}
 
       <div className="session-block">
-        <h4>Viewers ({room.clients.length})</h4>
+        <BlockHead title={`Viewers (${room.clients.length})`}
+          help="Each viewer's status, stream, sync offset from the session position and forward buffer, updated live. Select a viewer for their client, formats and data totals." />
         <Viewers room={room} tracks={tracks} />
       </div>
 
-      <SyncCharts room={room} />
-
-      <LiveOverview room={room} tracks={tracks} durationS={durationS} />
-
-      {(room.away.length > 0 || room.queue.length > 0 || room.held) && (
+      {room.streams.length > 0 && (
         <div className="session-block">
-          {room.held && <p className="note">{heldNote(room)}</p>}
-          {!room.held && room.away.length > 0 && <p className="note">{awayNote(room)}</p>}
-          {room.queue.length > 0 && (
-            <details className="queue">
-              <summary>Queue ({room.queue.length})</summary>
-              <ol>{room.queue.map((q, i) => <li key={`${q.ratingKey}-${i}`}>{q.title} <span className="muted">{q.type}</span></li>)}</ol>
-            </details>
-          )}
+          <BlockHead title={`Streams (${room.streams.length})`}
+            help="Each stream the server is sending: whether it is played directly or transcoded and why, its tracks, progress and viewers." />
+          {room.streams.map((s, i) => <StreamCard key={s.variantKey} s={infoOf(room, s, i + 1, tracks)} />)}
+        </div>
+      )}
+
+      <LiveTimeline room={room} tracks={tracks} durationS={durationS} />
+
+      {recorded && (room.shares?.length ?? 0) > 0 && (
+        <div className="session-block">
+          <BlockHead title="Peer-to-peer sharing" help="Video data relayed from one viewer's player to another in this session." />
+          <ShareList shares={room.shares ?? []} nameOf={(id) => nameOf(room, id)} />
+        </div>
+      )}
+
+      {room.queue.length > 0 && (
+        <div className="session-block">
+          <BlockHead title={`Queue (${room.queue.length})`} help="Titles that start in this order when the current one ends." />
+          <ol className="queue-list">{room.queue.map((q, i) => <li key={`${q.ratingKey}-${i}`}>{q.title} <span className="muted">{q.type}</span></li>)}</ol>
         </div>
       )}
     </section>
@@ -465,11 +372,12 @@ function Facts({ room, watching }: { room: Room; watching: number }) {
   return (
     <div className="facts">
       <span className="fact"><Icon name="users" size={14} />Host <strong>{nameOf(room, room.discord.hostUserId)}</strong></span>
-      <span className="fact"><Icon name="people" size={14} /><strong>{watching}</strong> of {room.clients.length} watching</span>
+      <span className="fact"><Icon name="people" size={14} />{room.ratingKey
+        ? <><strong>{watching}</strong> of {room.clients.length} watching</>
+        : <><strong>{room.clients.filter((c) => c.connected).length}</strong> connected</>}</span>
       <span className="fact"><Icon name="places" size={14} />Server <strong><PlaceName kind="guild" id={room.discord.guildId} /></strong></span>
       <span className="fact">Channel <strong><PlaceName kind="channel" id={room.discord.channelId} /></strong></span>
-      <span className="fact"><Icon name="clock" size={14} />Opened {dateTime(room.discord.startedAt)}</span>
-      {room.playId ? <a className="fact" href={`#history/${room.playId}`}>Session timeline →</a> : null}
+      <span className="fact"><Icon name="clock" size={14} />Opened {dayTime(room.discord.startedAt)}</span>
     </div>
   );
 }
@@ -486,6 +394,17 @@ function allFlow(rooms: Room[]): FlowPoint[] {
   return [...at.values()].sort((a, b) => a[0] - b[0]);
 }
 
+/** Streams by how each is delivered, in the words its own badge uses: "1 direct play · 1 direct stream · 1 transcode". */
+function DeliveryCounts({ streams }: { streams: Stream[] }) {
+  const ways = streams.map((s) => decisionOf({ ...s, started: !!s.hlsSessionId }).label);
+  const parts = ([["Direct play", "good-text"], ["Direct stream", "good-text"], ["Transcode", "warn-text"], ["Starting", "muted"], ["Not started", "muted"]] as const)
+    .map(([label, cls]) => [label, cls, ways.filter((w) => w === label).length] as const).filter(([, , n]) => n > 0);
+  if (parts.length === 0) return <>No active streams</>;
+  return <>{parts.map(([label, cls, n], i) => (
+    <span key={label}>{i > 0 && " · "}<span className={`${cls} nowrap`}>{n} {label.toLowerCase()}</span></span>
+  ))}</>;
+}
+
 export function NowPlaying({ data }: { data: Overview | null }) {
   const info = useTitles((data?.rooms ?? []).map((r) => r.ratingKey));
   if (!data) return <p className="empty">Loading…</p>;
@@ -499,16 +418,16 @@ export function NowPlaying({ data }: { data: Overview | null }) {
   return (
     <>
       <div className="page-head">
-        <h1>Now Playing</h1>
-        <p className="muted">Active rooms, updated in real time. Times are shown in your local time zone ({zoneLabel()}).</p>
+        <h1>Activity</h1>
+        <p className="muted">Active rooms and their sessions, updated live. Times are shown in your local time zone ({zoneLabel()}).</p>
       </div>
-      <div className="stats">
+      <div className={`stats${recorded ? " six" : ""}`}>
         <Stat icon={<Icon name="now" />} label="Active sessions" value={playing.length}
           sub={`${t.rooms} ${t.rooms === 1 ? "room" : "rooms"} open`} />
         <Stat icon={<Icon name="users" />} label="Viewers" value={t.watching}
-          sub={`${t.people} connected`} />
+          sub={<><span className="nowrap">Watching now</span> · <span className="nowrap">{t.people} connected</span></>} />
         <Stat icon={<Icon name="stream" />} label="Streams" value={t.streams}
-          sub={<><span className="good-text">{t.copied} direct</span> · <span className={t.reencoded ? "warn-text" : ""}>{t.reencoded} transcoding</span></>} />
+          sub={<DeliveryCounts streams={data.rooms.flatMap((r) => r.streams)} />} />
         <Stat icon={<Icon name="upload" />} label="Server upload" value={recorded ? bps(last ? last[1] : 0) : rate(t.feedKbps)}
           sub={recorded ? `Required: ${bps(required)}` : "Required bitrate of all streams"}>
           {recorded && <Spark values={flow.map((p) => p[1])} />}
@@ -528,8 +447,8 @@ export function NowPlaying({ data }: { data: Overview | null }) {
         ? (
           <section className="card empty-state">
             <Icon name="film" size={36} />
-            <h3>Nothing is playing</h3>
-            <p className="muted">Rooms appear here when someone opens the Activity in Discord.</p>
+            <h3>No active sessions</h3>
+            <p className="muted">Rooms appear here when a user launches the Activity in Discord.</p>
           </section>
         )
         : data.rooms.map((r) => {

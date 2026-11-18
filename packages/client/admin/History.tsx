@@ -1,20 +1,22 @@
 import { Fragment, useState } from "react";
 import { api } from "./api";
-import type { PlayEvent, PlayStream, PlaySummary, PlayViewer } from "./types";
-import { bytes, clock, dateTime, short, timeOfDay } from "./format";
+import type { HealthPoint, PlayEvent, PlayStream, PlaySummary, PlayViewer, ProcessingStep } from "./types";
+import { bytes, clock, dateTime, dayTime, duration, short, shortTime, timeOfDay } from "./format";
 import {
-  BufferingCell, bufferingTone, DataCell, Downloads, eventText, eventTone, GROUP_LABELS, groupOf, PlaceName, useLoad, Where, Who,
+  BlockHead, BufferingCell, bufferingTone, DataCell, Downloads, eventText, eventTone, GROUP_LABELS, groupOf, PlaceName, SectionNav, useLoad, Where, Who,
   type EventGroup,
 } from "./parts";
 import { StreamCard } from "./streams";
-import { KeyMoments, SessionChart, Watched } from "./timeline";
+import { KeyMoments, SessionTimeline, Watched } from "./timeline";
 import { eventDetails, newestFirst, streamLabel, type EventContext } from "./events";
 import { clientName, clientsOf, formatsText, rolesOf } from "./clients";
 import { MiniChart } from "./lazy";
 import { Icon } from "./icons";
 import { Poster, titleLine, useTitles } from "./titles";
-import { Avatar, FlowChart, pct, ShareList, SplitBar, type FlowPoint } from "./viz";
+import { Avatar, pct, ShareList, SplitBar } from "./viz";
 import { awayOf, loadTimes, pausesByPerson, pausesOf, type LoadStats } from "./session";
+import { PROCESSING_HELP, processingName, stepDetail } from "./processing";
+import { healthSummary, type HealthSummary } from "./lanes";
 import { sessionLogsHref } from "./Logs";
 
 const PAGE = 50;
@@ -31,7 +33,7 @@ function endText(p: Ending): string {
   if (p.endReason === "another title") {
     return p.endCause === "next episode" ? `Next episode started${by}`
       : p.endCause === "previous episode" ? `Previous episode started${by}`
-        : p.endCause === "co-host" ? "Co-host's request started"
+        : p.endCause === "co-host" ? "Title started at a co-host's request"
           : p.endCause === "queue" ? `Queued title started${by}`
             : p.endCause === "up next" || p.endCause === "end screen" ? `Next title started${by}`
               : `Another title started${by}`;
@@ -105,7 +107,7 @@ function PlayRow({ p, sub }: { p: PlaySummary; sub: string | null }) {
         <span className="play-main">
           <span className="play-title">{p.title ?? `Plex item ${p.ratingKey}`}</span>
           <span className="play-sub">
-            {sub ? `${sub} · ` : ""}{dateTime(p.startedAt)} · Host: {p.hostName ?? p.hostUserId ?? "unknown"}
+            {sub ? `${sub} · ` : ""}{dayTime(p.startedAt)} · Host: {p.hostName ?? p.hostUserId ?? "unknown"}
           </span>
           <span className="play-sub"><Where guildId={p.guildId} channelId={p.channelId} /></span>
         </span>
@@ -123,7 +125,7 @@ function PlayRow({ p, sub }: { p: PlaySummary; sub: string | null }) {
         <span className="play-col">
           {p.streams === 0 ? <span className="badge muted">No stream</span>
             : p.reencoded > 0 ? <span className="badge warn">{p.reencoded === p.streams ? "Transcode" : `${p.reencoded} of ${p.streams} transcoded`}</span>
-              : <span className="badge good">Direct</span>}
+              : <span className="badge good">Direct play / stream</span>}
           <span className="play-label">{p.streams} {p.streams === 1 ? "stream" : "streams"}</span>
         </span>
         <span className="play-col data-col">
@@ -131,7 +133,7 @@ function PlayRow({ p, sub }: { p: PlaySummary; sub: string | null }) {
           <SplitBar server={p.botBytes} cache={p.cacheBytes} peers={p.p2pBytes} legend={false} />
         </span>
         <span className="play-col">
-          <span className={`health ${stallTone}`}><span className={`dot ${stallTone}`} />{p.stalls === 0 ? "No buffering" : `Buffered ${p.stalls} ${p.stalls === 1 ? "time" : "times"}`}</span>
+          <span className={`health ${stallTone}`}><span className={`dot ${stallTone}`} />{p.stalls === 0 ? "No buffering" : `${p.stalls} buffering ${p.stalls === 1 ? "event" : "events"}`}</span>
           <span className="play-label">{endText(p)}</span>
         </span>
         <span className="chev"><Icon name="chevron" size={16} /></span>
@@ -157,6 +159,7 @@ function PlayPage({ id, onError }: { id: number; onError: (e: unknown) => void }
   const transcoded = streams.filter((s) => s.decision === "transcode").length;
   // Tracks and streams by name in what the page says of them.
   const ctx: EventContext = { tracks: i?.tracks ?? null, streams };
+  const pauses = pausesOf(events, play.endedAt ?? Date.now());
   return (
     <>
       <div className="crumbs"><a href="#history"><Icon name="back" size={14} /> History</a></div>
@@ -173,7 +176,7 @@ function PlayPage({ id, onError }: { id: number; onError: (e: unknown) => void }
             </div>
             <div className="facts">
               <span className="fact"><Icon name="users" size={14} />Host <strong><Who id={play.hostUserId} name={play.hostName} /></strong></span>
-              <span className="fact"><Icon name="clock" size={14} />{dateTime(play.startedAt)}{play.endedAt ? ` → ${timeOfDay(play.endedAt)}` : ""}</span>
+              <span className="fact"><Icon name="clock" size={14} />{dayTime(play.startedAt)}{play.endedAt ? ` – ${new Date(play.endedAt).toDateString() === new Date(play.startedAt).toDateString() ? shortTime(play.endedAt) : dayTime(play.endedAt)}` : " – now"}</span>
               <span className="fact"><Icon name="places" size={14} />Server <strong><PlaceName kind="guild" id={play.guildId} /></strong></span>
               <span className="fact">Channel <strong><PlaceName kind="channel" id={play.channelId} /></strong></span>
               <span className="fact">Room <span className="mono">{short(play.roomId, 14)}</span></span>
@@ -189,81 +192,127 @@ function PlayPage({ id, onError }: { id: number; onError: (e: unknown) => void }
               <div className="kpi"><span className="kpi-label">Viewers</span><span className="kpi-value">{viewers.length}</span>
                 <span className="kpi-sub">Peak of {play.peakViewers} at once</span></div>
               <div className="kpi"><span className="kpi-label">Streams</span><span className="kpi-value">{streams.length}</span>
-                <span className="kpi-sub">{transcoded ? `${transcoded} transcoded` : "All direct"}</span></div>
+                <span className="kpi-sub">{transcoded ? `${transcoded} transcoded` : "Direct play / stream"}</span></div>
               <div className="kpi"><span className="kpi-label">Data delivered</span><span className="kpi-value">{bytes(server + cache + peers)}</span>
-                <span className="kpi-sub">{pct(cache + peers, server + cache + peers)}% offloaded from the server</span></div>
+                <SplitBar server={server} cache={cache} peers={peers} legend="compact" /></div>
               <div className={`kpi ${health}`}><span className="kpi-label">Buffering</span>
                 <span className="kpi-value">{stalls === 0 ? "None" : `${stalls} ${stalls === 1 ? "event" : "events"}`}</span>
-                <span className="kpi-sub">{stalls ? `${clock(stalledMs / 1000)} in total` : "No interruptions"}{errors ? ` · ${errors} errors` : ""}</span></div>
+                <span className="kpi-sub">{stalls ? `${duration(stalledMs)} in total` : "No interruptions"}{errors ? ` · ${errors} errors` : ""}</span></div>
+              <div className="kpi"><span className="kpi-label">Pauses</span>
+                <span className="kpi-value">{pauses.length === 0 ? "None" : pauses.length}</span>
+                <span className="kpi-sub">{pauses.length ? `${duration(pauses.reduce((s, p) => s + p.ms, 0))} paused in total` : "Played without pausing"}</span></div>
             </div>
           </div>
         </div>
 
-        <div className="session-block">
-          <h4>Data sources</h4>
-          <SplitBar server={server} cache={cache} peers={peers} />
-          {(data.flow?.length ?? 0) > 1 && <SourcesOverTime flow={data.flow!} />}
-        </div>
-
-        <div className="session-block">
-          <h4>Viewers ({viewers.length})</h4>
-          <SessionViewers viewers={viewers} events={events} lead={data.lead ?? []} streams={streams} ctx={ctx} />
-        </div>
-
-        <div className="session-block">
-          <h4>Streams ({streams.length})</h4>
-          {streams.length === 0 ? <p className="muted">No stream was started.</p>
-            : streams.map((s, n) => (
-              <StreamCard key={s.id} s={{
-                n: n + 1, started: true, decision: s.decision, reason: s.reason, notes: s.notes, kbps: s.kbps, engine: s.engine,
-                quality: s.quality, variantKey: s.variantKey, hlsSessionId: s.hlsSessionId, audioStreamId: s.audioStreamId,
-                subtitleStreamId: s.subtitleStreamId, ownerName: nameOf(s.ownerUserId), ownerUserId: s.ownerUserId, offsetS: s.offsetS,
-                startedAt: s.startedAt, endedAt: s.endedAt, peakViewers: s.peakViewers, tracks: i?.tracks ?? null,
-              }} />
-            ))}
-        </div>
       </section>
 
-      <section className="card">
-        <div className="panel-head">
-          <h3>Session overview</h3>
-          <span className="muted small">Playback position, streams and viewers over time.</span>
-        </div>
-        <SessionChart data={data} durationS={i?.durationS ?? null} ctx={ctx} />
+      <SectionNav sections={[
+        ["timeline", "Timeline"], ["viewers", "Viewers"], ["moments", "Key moments"], ["coverage", "Viewing coverage"],
+        ["streams", "Streams"], ["processing", "Media processing"], ...((data.shares?.length ?? 0) > 0 ? [["sharing", "Peer-to-peer sharing"] as [string, string]] : []),
+        ["events", "Event log"],
+      ]} />
+
+      <section className="card" id="sec-timeline">
+        <BlockHead title="Session timeline"
+          help="Playback, position in the title, streams, viewers, data delivered and player health on one time axis. Hover over or tap the chart for the values at that moment." />
+        <SessionTimeline data={data} durationS={i?.durationS ?? null} ctx={ctx} />
       </section>
 
-      <section className="card">
-        <div className="panel-head">
-          <h3>Viewing coverage</h3>
-          <span className="muted small">The portions of the title each viewer watched, with buffering and errors marked.</span>
-        </div>
+      <section className="card" id="sec-viewers">
+        <BlockHead title={`Viewers (${viewers.length})`}
+          help="What each viewer watched and received, their buffering, pauses, loading times and time away from Discord. Select a viewer for their roles, clients and each pause." />
+        <SessionViewers viewers={viewers} events={events} lead={data.lead ?? []} streams={streams} ctx={ctx} end={play.endedAt ?? Date.now()}
+          health={data.health ?? {}} />
+      </section>
+
+      <section className="card" id="sec-moments">
+        <BlockHead title="Key moments" help="Significant events and their causes, newest first." />
+        <KeyMoments data={data} ctx={ctx} />
+      </section>
+
+      <section className="card" id="sec-coverage">
+        <BlockHead title="Viewing coverage"
+          help="Portions of the title watched by each viewer, on the title's runtime, with seeks, buffering and player errors marked." />
         <Watched data={data} durationS={i?.durationS ?? null} />
       </section>
 
-      <div className="cards-2">
-        <Pauses events={events} end={play.endedAt ?? Date.now()} />
-        <LoadTimes viewers={viewers} events={events} />
-      </div>
+      <section className="card" id="sec-streams">
+        <BlockHead title={`Streams (${streams.length})`}
+          help="Each stream the server sent: whether it was played directly or transcoded and why, its tracks and its viewers." />
+        {streams.length === 0 ? <p className="muted">No stream was started.</p>
+          : streams.map((s, n) => (
+            <StreamCard key={s.id} s={{
+              n: n + 1, started: true, decision: s.decision, reason: s.reason, notes: s.notes, kbps: s.kbps, engine: s.engine,
+              quality: s.quality, variantKey: s.variantKey, hlsSessionId: s.hlsSessionId, audioStreamId: s.audioStreamId,
+              subtitleStreamId: s.subtitleStreamId, ownerName: nameOf(s.ownerUserId), ownerUserId: s.ownerUserId, offsetS: s.offsetS,
+              startedAt: s.startedAt, endedAt: s.endedAt, peakViewers: s.peakViewers, tracks: i?.tracks ?? null,
+            }} />
+          ))}
+      </section>
+
+      <section className="card" id="sec-processing">
+        <BlockHead title="Media processing"
+          help="How long the server took to analyse the file, set up each stream, produce its first segment, extract subtitles and generate seek previews." />
+        <ProcessingTable steps={data.processing ?? []} streams={streams} />
+      </section>
 
       {(data.shares?.length ?? 0) > 0 && (
-        <section className="card">
-          <div className="panel-head">
-            <h3>Peer-to-peer sharing</h3>
-            <span className="muted small">Video each viewer's player sent another's.</span>
-          </div>
+        <section className="card" id="sec-sharing">
+          <BlockHead title="Peer-to-peer sharing" help="Video data relayed from one viewer's player to another." />
           <ShareList shares={data.shares ?? []} nameOf={(id) => nameOf(id) ?? id} />
         </section>
       )}
 
-      <section className="card">
-        <div className="panel-head">
-          <h3>Key moments</h3>
-          <span className="muted small">Significant events and their causes, newest first.</span>
-        </div>
-        <KeyMoments data={data} ctx={ctx} />
-      </section>
-
       <Timeline events={events} ctx={ctx} />
+    </>
+  );
+}
+
+/** Links to each section of a session's page; the address keeps the session, so each scrolls rather than navigates. */
+/** Each step of preparing the title and its streams, oldest first, with how long it took. */
+function ProcessingTable({ steps, streams }: { steps: ProcessingStep[]; streams: PlayStream[] }) {
+  if (steps.length === 0) {
+    return <p className="muted">No processing steps were recorded for this session. Sessions recorded before this version have none.</p>;
+  }
+  const streamOf = (id: string | null) => {
+    const n = id ? streams.findIndex((s) => s.hlsSessionId === id) : -1;
+    return n >= 0 ? `Stream ${n + 1}` : "Title";
+  };
+  // From reading the file to the first stream's first segment: what the first viewer waited for.
+  const first = streams[0]?.hlsSessionId ?? null;
+  const startup = ["probe", "stream setup", "first segment"].map((k) => steps.find((s) => s.kind === k && s.ok && (k === "probe" || s.hlsSessionId === first)));
+  const startupMs = startup.every(Boolean) ? startup.reduce((sum, s) => sum + s!.ms, 0) : null;
+  const sorted = [...steps].sort((a, b) => a.at - b.at || a.id - b.id);
+  return (
+    <>
+      {startupMs !== null && (
+        <div className="tiles processing-tiles">
+          <div className="kpi"><span className="kpi-label">Startup</span><span className="kpi-value">{duration(startupMs)}</span>
+            <span className="kpi-sub">File analysis, stream setup and first segment</span></div>
+          {startup.map((s) => (
+            <div key={s!.id} className="kpi"><span className="kpi-label">{processingName(s!.kind)}</span><span className="kpi-value">{duration(s!.ms)}</span>
+              <span className="kpi-sub">{PROCESSING_HELP[s!.kind]}</span></div>
+          ))}
+        </div>
+      )}
+      <div className="table-wrap">
+        <table className="table">
+          <thead><tr><th>Time</th><th>Step</th><th>Applies to</th><th className="num">Duration</th><th>Result</th><th>Details</th></tr></thead>
+          <tbody>
+            {sorted.map((s) => (
+              <tr key={s.id}>
+                <td className="nowrap mono">{timeOfDay(s.at)}</td>
+                <td className="nowrap">{processingName(s.kind, typeof s.detail?.encode === "boolean" ? s.detail.encode : null)}</td>
+                <td className="nowrap">{streamOf(s.hlsSessionId)}</td>
+                <td className="num nowrap">{duration(s.ms)}</td>
+                <td>{s.ok ? <span className="badge good">Completed</span> : <span className="badge bad">Failed</span>}</td>
+                <td className="small">{stepDetail(s) || "—"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </>
   );
 }
@@ -271,23 +320,26 @@ function PlayPage({ id, onError }: { id: number; onError: (e: unknown) => void }
 const ROLE: Record<string, string> = { host: "Host", "co-host": "Co-host", viewer: "Viewer" };
 
 /**
- * A session's viewers as Now Playing shows them: who, on which client, on
+ * A session's viewers as Activity shows them: who, on which client, on
  * which streams, what they watched, received and sent, and how it went; each
  * opens for the rest — their roles over it, the clients they moved between,
  * when, and what each played. `lead` is what each did in the room before the
  * session opened, where a host's joining is.
  */
-function SessionViewers({ viewers, events, lead, streams: all, ctx }: {
-  viewers: PlayViewer[]; events: PlayEvent[]; lead: PlayEvent[]; streams: PlayStream[]; ctx: EventContext;
+function SessionViewers({ viewers, events, lead, streams: all, ctx, end, health }: {
+  viewers: PlayViewer[]; events: PlayEvent[]; lead: PlayEvent[]; streams: PlayStream[]; ctx: EventContext; end: number;
+  health: Record<string, HealthPoint[]>;
 }) {
   const [open, setOpen] = useState<string | null>(null);
   const whole = [...lead, ...events];
+  const pausers = new Map(pausesByPerson(pausesOf(events, end)).map((p) => [p.userId ?? "", p]));
   return (
     <div className="table-wrap">
       <table className="table viewers">
         <thead>
           <tr>
-            <th>Viewer</th><th>Streams</th><th>Watched</th><th>Data received</th><th className="num">Sent to viewers</th><th>Buffering</th>
+            <th>Viewer</th><th>Streams</th><th>Watched</th><th>Data received</th><th className="num">Sent to peers</th><th>Buffering</th>
+            <th>Pauses</th><th>Loading</th><th className="num">Away</th>
             <th aria-label="Details" />
           </tr>
         </thead>
@@ -304,6 +356,7 @@ function SessionViewers({ viewers, events, lead, streams: all, ctx }: {
             const keys = onto.length ? onto : own.length ? own : all.filter((s) => !s.ownerUserId).slice(0, 1).map((s) => s.variantKey);
             const streams = [...new Set(keys.map((k) => streamLabel(ctx, k)))];
             const shown = open === v.userId;
+            const paused = pausers.get(v.userId);
             return (
               <Fragment key={v.userId}>
                 <tr className={`link-row${shown ? " open" : ""}`} onClick={() => setOpen(shown ? null : v.userId)}>
@@ -323,15 +376,24 @@ function SessionViewers({ viewers, events, lead, streams: all, ctx }: {
                   <td><DataCell d={v} /></td>
                   <td className="num">{v.upBytes > 0 ? bytes(v.upBytes) : "—"}</td>
                   <td><BufferingCell d={v} /></td>
+                  <td className="nowrap">{paused ? <>{paused.count}<span className="muted"> · {duration(paused.totalMs)}</span></> : <span className="muted">None</span>}</td>
+                  <td className="nowrap small">{loads.start || loads.seek ? <>
+                    {loads.start && <span className="pause-at">Start {duration(loads.start.avgMs)}</span>}
+                    {loads.seek && <span className="pause-at">Seeks {duration(loads.seek.avgMs)} avg · {loads.seek.count}×</span>}
+                  </> : <span className="muted">—</span>}</td>
+                  <td className="num nowrap">{awayMs > 0 ? duration(awayMs) : <span className="muted">—</span>}</td>
                   <td className="chev-cell"><span className={`chev${shown ? " open" : ""}`}><Icon name="chevron" size={16} /></span></td>
                 </tr>
                 {shown && (
                   <tr className="detail-row">
-                    <td colSpan={7}>
+                    <td colSpan={10}>
+                      <div className="detail-groups quad">
+                      <section className="detail-group">
+                      <h5>User and client</h5>
                       <dl className="grid">
                         <dt>Discord user ID</dt><dd className="mono">{v.userId}</dd>
-                        <dt>First seen</dt><dd>{dateTime(v.firstSeen)}</dd>
-                        <dt>Last seen</dt><dd>{dateTime(v.lastSeen)}</dd>
+                        <dt>First seen</dt><dd>{dayTime(v.firstSeen)}</dd>
+                        <dt>Last seen</dt><dd>{dayTime(v.lastSeen)}</dd>
                         {roles.length > 0 && <>
                           <dt>{roles.length > 1 ? "Roles" : "Role"}</dt>
                           <dd>{roles.length === 1 ? `${ROLE[roles[0].role]} throughout`
@@ -347,14 +409,37 @@ function SessionViewers({ viewers, events, lead, streams: all, ctx }: {
                               {clients.length > 1 && <span className="muted"> · {timeOfDay(c.from)} – {timeOfDay(c.to)}</span>}
                               <span className="client-formats">Plays {c.caps ? formatsText(c.caps, c.av1Encode) : "formats not recorded"}</span></span>
                           ))}</dd>
+                      </dl>
+                      </section>
+                      <section className="detail-group">
+                      <h5>Playback</h5>
+                      <dl className="grid">
                         <dt>Loading at the start</dt><dd>{loadText(loads.start)}</dd>
                         <dt>Loading after seeks</dt><dd>{loadText(loads.seek)}</dd>
-                        <dt>Away from the Discord window</dt><dd>{awayMs > 0 ? clock(awayMs / 1000) : "Never"}</dd>
+                        <dt>Away from Discord</dt><dd>{awayMs > 0 ? duration(awayMs) : "Never"}</dd>
+                        <dt>Pauses</dt>
+                        <dd>{!paused ? "None" : paused.pauses.map((x, n) => (
+                          <span key={n} className="client-span">{timeOfDay(x.at)}{x.posS !== null ? <span className="muted"> · at {clock(x.posS)}</span> : null}
+                            <span className="muted"> · {duration(x.ms)}{x.open ? " (until the end)" : ""}</span></span>
+                        ))}</dd>
+                      </dl>
+                      </section>
+                      <section className="detail-group">
+                      <h5>Player health</h5>
+                      <dl className="grid">
+                        <PlayerHealth h={healthSummary(health[v.userId] ?? [])} />
+                      </dl>
+                      </section>
+                      <section className="detail-group">
+                      <h5>Data</h5>
+                      <dl className="grid">
                         <dt>Received from the server</dt><dd>{bytes(v.botBytes)}</dd>
                         <dt>Received from Discord's cache</dt><dd>{bytes(Math.min(v.edgeHitBytes, v.httpBytes))}</dd>
                         <dt>Received from other viewers</dt><dd>{bytes(v.p2pBytes)}</dd>
                         <dt>Sent to other viewers</dt><dd>{bytes(v.upBytes)}</dd>
                       </dl>
+                      </section>
+                      </div>
                     </td>
                   </tr>
                 )}
@@ -367,117 +452,66 @@ function SessionViewers({ viewers, events, lead, streams: all, ctx }: {
   );
 }
 
-/** "3 times, 2.1 s on average, 4.0 s at most". */
+/** "3 times, 2.1 s on average, 4 s at most". */
 function loadText(s: LoadStats | null): string {
   if (!s) return "None recorded";
-  return s.count === 1 ? `Once, ${(s.avgMs / 1000).toFixed(1)} s` : `${s.count} times, ${(s.avgMs / 1000).toFixed(1)} s on average, ${(s.longestMs / 1000).toFixed(1)} s at most`;
+  return s.count === 1 ? `Once, ${duration(s.avgMs)}` : `${s.count} times, ${duration(s.avgMs)} on average, ${duration(s.longestMs)} at most`;
 }
 
-/** What the players had from each source over the session, minute by minute (older sessions have only the bar above). */
-function SourcesOverTime({ flow }: { flow: Array<[number, number, number, number]> }) {
-  // Every minute from the first to the last, a quiet one as nothing: the chart spaces its points evenly.
-  const by = new Map(flow.map((m) => [m[0], m] as const));
-  const points: FlowPoint[] = [];
-  for (let t = flow[0][0]; t <= flow[flow.length - 1][0]; t += 60_000) {
-    const m = by.get(t);
-    // Bytes in a minute, as bits a second.
-    points.push(m ? [t, (m[1] * 8) / 60, (m[2] * 8) / 60, (m[3] * 8) / 60] : [t, 0, 0, 0]);
-  }
+/** A viewer's player over the session, from its samples every 10 seconds: sync, buffers, frames, rate, peers, memory. */
+function PlayerHealth({ h }: { h: HealthSummary }) {
+  if (h.samples === 0) return <><dt>Player health</dt><dd className="muted">Not recorded for this session</dd></>;
+  const secs = (s: number) => duration(s * 1000);
+  const range = (avg: number | null, low: number | null) => (avg === null || low === null ? "Not reported" : `${secs(avg)} on average, ${secs(low)} at lowest`);
+  const frames = h.framesShown === null && h.framesDropped === null ? null : (h.framesShown ?? 0) + (h.framesDropped ?? 0);
+  const rate = (x: number) => `${Number(x.toFixed(2))}×`;
   return (
-    <div className="sources-time">
-      <p className="muted small">Over the session, a minute at a time.</p>
-      <FlowChart points={points} requiredBps={null} stepS={60} height={130}
-        axis={[timeOfDay(points[0][0]), timeOfDay(points[points.length - 1][0])]} label="Data sources over the session" />
-    </div>
-  );
-}
-
-/** Who paused, how often and for how long. */
-function Pauses({ events, end }: { events: PlayEvent[]; end: number }) {
-  const all = pausesOf(events, end);
-  const people = pausesByPerson(all);
-  return (
-    <section className="card">
-      <div className="panel-head">
-        <h3>Pauses</h3>
-        <span className="muted small">{all.length === 0 ? "Playback was never paused." : `${all.length} in all, ${clock(all.reduce((s, p) => s + p.ms, 0) / 1000)} paused.`}</span>
-      </div>
-      {people.length > 0 && (
-        <div className="table-wrap">
-          <table className="table">
-            <thead><tr><th>Who</th><th className="num">Pauses</th><th className="num">Paused for</th><th className="num">Longest</th><th>When</th></tr></thead>
-            <tbody>
-              {people.map((p) => (
-                <tr key={p.userId ?? ""}>
-                  <td>{p.userId ? <Who id={p.userId} name={p.username} /> : "Unknown"}</td>
-                  <td className="num">{p.count}</td>
-                  <td className="num">{clock(p.totalMs / 1000)}</td>
-                  <td className="num">{clock(p.longestMs / 1000)}</td>
-                  <td className="small">{p.pauses.map((x, n) => (
-                    <span key={n} className="pause-at">{timeOfDay(x.at)}{x.posS !== null ? ` at ${clock(x.posS)}` : ""}, {clock(x.ms / 1000)}{x.open ? " (until the end)" : ""}</span>
-                  ))}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </section>
-  );
-}
-
-/** How long each viewer's player took to load at the start and after seeks, and the session's average. */
-function LoadTimes({ viewers, events }: { viewers: PlayViewer[]; events: PlayEvent[] }) {
-  const cell = (s: LoadStats | null) => (s ? <>{(s.avgMs / 1000).toFixed(1)} s<span className="muted"> · {s.count}× · max {(s.longestMs / 1000).toFixed(1)} s</span></> : "—");
-  const session = loadTimes(events, null);
-  return (
-    <section className="card">
-      <div className="panel-head">
-        <h3>Loading times</h3>
-        <span className="muted small">Average time each player took to show the picture.</span>
-      </div>
-      <div className="table-wrap">
-        <table className="table">
-          <thead><tr><th>Viewer</th><th>At the start</th><th>After seeks</th></tr></thead>
-          <tbody>
-            {viewers.map((v) => {
-              const l = loadTimes(events, v.userId);
-              return <tr key={v.userId}><td><Who id={v.userId} name={v.username} /></td><td>{cell(l.start)}</td><td>{cell(l.seek)}</td></tr>;
-            })}
-            <tr className="total-row"><td>Session</td><td>{cell(session.start)}</td><td>{cell(session.seek)}</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </section>
+    <>
+      <dt>Sync offset</dt>
+      <dd>{h.syncAvgS === null || h.syncMaxS === null ? "None: the session's position follows this player (host)"
+        : `${h.syncAvgS.toFixed(1)} s on average, ${h.syncMaxS.toFixed(1)} s at most`}</dd>
+      <dt>Forward buffer</dt><dd>{range(h.aheadAvgS, h.aheadMinS)}</dd>
+      <dt>Media element buffer</dt><dd>{range(h.bufferAvgS, h.bufferMinS)}</dd>
+      <dt>Frames dropped</dt>
+      <dd>{frames === null ? "Not reported by this client"
+        : `${(h.framesDropped ?? 0).toLocaleString("en")} of ${frames.toLocaleString("en")}${frames > 0 ? ` (${(((h.framesDropped ?? 0) / frames) * 100).toFixed(1)}%)` : ""}`}</dd>
+      <dt>Playback rate</dt>
+      <dd>{h.rateMin === null || h.rateMax === null ? "Not reported"
+        : h.rateMin === 1 && h.rateMax === 1 ? "1× throughout" : `${rate(h.rateMin)} – ${rate(h.rateMax)} while correcting sync`}</dd>
+      <dt>Peers</dt><dd>{h.peersMax === null ? "Not reported" : h.peersMax === 0 ? "None" : `Up to ${h.peersMax}`}</dd>
+      <dt>Player memory</dt><dd>{h.memoryMaxMb === null ? "Not reported" : `${Math.round(h.memoryMaxMb)} MB at most (JavaScript heap)`}</dd>
+    </>
   );
 }
 
 const ALL_GROUPS: EventGroup[] = ["playback", "people", "streams", "problems", "other"];
 
 function Timeline({ events, ctx }: { events: PlayEvent[]; ctx: EventContext }) {
-  const [shown, setShown] = useState<Set<EventGroup>>(() => new Set(ALL_GROUPS));
+  const [shown, setShown] = useState<Set<EventGroup>>(() => new Set());
   const [open, setOpen] = useState<number | null>(null);
   const counts = new Map<EventGroup, number>();
   for (const e of events) counts.set(groupOf(e), (counts.get(groupOf(e)) ?? 0) + 1);
-  const list = newestFirst(events.filter((e) => shown.has(groupOf(e))));
+  const list = newestFirst(shown.size === 0 ? events : events.filter((e) => shown.has(groupOf(e))));
   const toggle = (g: EventGroup) => {
     const next = new Set(shown);
     if (next.has(g)) next.delete(g); else next.add(g);
     setShown(next);
   };
   return (
-    <section className="card">
+    <section className="card" id="sec-events">
+      <BlockHead title={`Event log (${shown.size ? `${list.length} of ${events.length}` : events.length})`}
+        help="Every recorded event, newest first. Select one or more types to show only those; with none selected, every event is shown." />
       <div className="panel-head">
-        <h3>All events <span className="muted">({events.length}, newest first)</span></h3>
-        <div className="chips" role="group" aria-label="Filter events">
+        <div className="chips" role="group" aria-label="Show only these event types">
           {ALL_GROUPS.filter((g) => counts.get(g)).map((g) => (
             <button key={g} className={`chip g-${g} ${shown.has(g) ? "on" : ""}`} aria-pressed={shown.has(g)} onClick={() => toggle(g)}>
               <span className={`marker g-${g}`} />{GROUP_LABELS[g]} <span className="muted">{counts.get(g)}</span>
             </button>
           ))}
+          {shown.size > 0 && <button type="button" className="link" onClick={() => setShown(new Set())}>Show all</button>}
         </div>
       </div>
-      {list.length === 0 ? <p className="empty">No events match the selected filters.</p> : (
+      {list.length === 0 ? <p className="empty">No events match the selected types.</p> : (
         <ol className="timeline">
           {list.map((e) => (
             <li key={e.id} className={`event ${eventTone(e)}`}>

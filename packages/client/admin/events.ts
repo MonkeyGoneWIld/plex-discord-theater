@@ -1,5 +1,5 @@
 import type { PlayEvent, TrackPoint } from "./types";
-import { clock, quality } from "./format";
+import { clock, duration, quality } from "./format";
 import { clientName, formatsText } from "./clients";
 
 /**
@@ -39,37 +39,38 @@ export function groupOf(e: PlayEvent): EventGroup {
 
 const secs = (ms: unknown) => {
   const n = Number(ms);
-  return Number.isFinite(n) ? (n < 10_000 ? `${(n / 1000).toFixed(1)} s` : clock(n / 1000)) : "an unknown time";
+  // The same form as every other duration on the dashboard: 640 ms, 3 s, 6.6 s, 38 s, 3:20.
+  return Number.isFinite(n) ? duration(n) : "an unknown time";
 };
 const role = (v: unknown) => (v === "co-host" ? "co-host" : v === "host" ? "host" : "viewer");
 
 /** How the host or a co-host changed (server sync.ts RoleWhy), for an event's details. */
 const ROLE_WHY: Record<string, string> = {
-  "handed over": "the host handed it over", "request accepted": "requested, and the host accepted",
-  "request not answered": "requested, and the host didn't answer in time", "taken back": "taken back by the host it was passed from",
-  "host left": "the host left", "host not back": "the host didn't come back in time", "host back": "the host reconnected in time",
-  "nobody was host": "nobody else was host", "co-host given": "given by the host", "co-host removed": "removed by the host",
+  "handed over": "transferred by the host", "request accepted": "requested and approved by the host",
+  "request not answered": "requested; the host did not respond in time", "taken back": "reclaimed by the previous host",
+  "host left": "the host left the session", "host not back": "the host did not reconnect in time", "host back": "the host reconnected in time",
+  "nobody was host": "no other host was present", "co-host given": "granted by the host", "co-host removed": "revoked by the host",
 };
 
 /** A change of host or co-host, and how it came about: `by` had the role or gave it, `target` got it. */
 function roleText(who: string, d: Record<string, unknown>): string {
   const by = d.by ? String(d.by) : "the host";
   const target = d.target ? String(d.target) : "another viewer";
-  const away = d.away ? " (away from the Discord window)" : "";
+  const away = d.away ? " (away from Discord)" : "";
   const toHost = d.to === "host";
   const now = d.to === "co-host" ? "a co-host" : "a viewer";
   switch (d.why) {
-    case "handed over": return toHost ? `${who} became host: ${by} handed it over` : `${who} handed host to ${target} and is now co-host`;
-    case "request accepted": return toHost ? `${who} requested host and ${by} accepted` : `${who} accepted ${target}'s request for host and is now co-host`;
-    case "request not answered": return toHost ? `${who} requested host and got it: ${by} didn't answer in time${away}`
-      : `${who} didn't answer ${target}'s request for host in time${away}, so it passed to them; ${who} is now co-host`;
-    case "taken back": return toHost ? `${who} took host back from ${by}` : `${who} is now co-host: ${target} took host back`;
-    case "host left": return `${who} became host when ${by} left`;
-    case "host not back": return `${who} became host: the host didn't come back in time`;
-    case "host back": return toHost ? `${who} is host again` : `${who} is ${now} again: ${target} reconnected in time and is host`;
-    case "nobody was host": return `${who} became host: nobody else was`;
-    case "co-host given": return `${by} made ${who} a co-host`;
-    case "co-host removed": return `${by} removed ${who} as co-host`;
+    case "handed over": return toHost ? `${who} became host: transferred by ${by}` : `${who} transferred host to ${target} and became co-host`;
+    case "request accepted": return toHost ? `${who} became host: ${by} approved the request` : `${who} approved ${target}'s host request and became co-host`;
+    case "request not answered": return toHost ? `${who} became host: ${by} did not respond to the request in time${away}`
+      : `${who} did not respond to ${target}'s host request in time${away}; host transferred to ${target} and ${who} became co-host`;
+    case "taken back": return toHost ? `${who} reclaimed host from ${by}` : `${who} became co-host: ${target} reclaimed host`;
+    case "host left": return `${who} became host after ${by} left the session`;
+    case "host not back": return `${who} became host: the previous host did not reconnect in time`;
+    case "host back": return toHost ? `${who} resumed as host` : `${who} returned to ${now}: ${target} reconnected in time and resumed as host`;
+    case "nobody was host": return `${who} became host: no other host was present`;
+    case "co-host given": return `${by} granted co-host to ${who}`;
+    case "co-host removed": return `${by} revoked co-host from ${who}`;
   }
   return `${who} became ${role(d.to)}`;
 }
@@ -212,24 +213,24 @@ export function eventText(e: PlayEvent, ctx?: EventContext): string {
     }
     case "ended": return `Session ended: ${endText(d, e.username)}`;
     case "reached the end": return d.early
-      ? `${who} reached the end of the stream${Number.isFinite(Number(d.breakAtS)) ? ` at ${clock(Number(d.breakAtS))}` : ""}, before the length Plex reports; playback was ended there`
+      ? `${who} reached the end of the stream${Number.isFinite(Number(d.breakAtS)) ? ` at ${clock(Number(d.breakAtS))}` : ""}, before the duration Plex reports; playback ended there`
       : `${who} reached the end of the title`;
     case "joined": return `${who} joined as ${role(d.role)}${d.device ? ` on ${clientName(d.device)}` : ""}`
-      + `${d.why === "nobody was host" ? ": nobody else was host" : ""}`;
-    case "came back": return `${who} reconnected${d.device ? ` on ${clientName(d.device)}` : ""}${d.why === "host back" ? " and is host again" : ""}`;
+      + `${d.why === "nobody was host" ? ": no other host was present" : ""}`;
+    case "came back": return `${who} reconnected${d.device ? ` on ${clientName(d.device)}` : ""}${d.why === "host back" ? " and resumed as host" : ""}`;
     case "switched client": return `${who} moved from ${clientName(d.from)} to ${clientName(d.to)}`;
-    case "left": return `${who} left`;
+    case "left": return `${who} left the session`;
     case "away from Discord": return `${who} switched away from the Discord window`;
     case "back in Discord": return `${who} returned to the Discord window`;
     case "role": return roleText(who, d);
     case "asked for host": return `${who} requested host${d.host ? ` from ${String(d.host)}` : ""}`
-      + `${d.away ? `, who was away from the Discord window` : ""}`;
+      + `${d.away ? ` (away from Discord)` : ""}`;
     case "request declined": return `${d.host ? String(d.host) : "The host"} declined ${who}'s request for host`;
     case "request ended": return d.why === "asker left"
-      ? `${who}'s request for host ended: they left before ${d.host ? String(d.host) : "the host"} answered`
-      : `${who}'s request for host ended: the host role moved before ${d.host ? String(d.host) : "the host"} answered`;
-    case "short sound": return `The sound stops at ${clock(Number(d.soundEndsS))}, before the picture ends at ${clock(Number(d.pictureEndsS))}: `
-      + "it was read on its own and filled with silence to the end";
+      ? `${who}'s host request was withdrawn: ${who} left before ${d.host ? String(d.host) : "the host"} responded`
+      : `${who}'s host request was withdrawn: host changed before ${d.host ? String(d.host) : "the host"} responded`;
+    case "short sound": return `The audio ends at ${clock(Number(d.soundEndsS))}, before the video ends at ${clock(Number(d.pictureEndsS))}; `
+      + "the audio was processed separately and padded with silence to the end of the video";
     case "stream changed": {
       const on = `${streamLabel(ctx, d.to)} (${tracksOf(ctx, d.to, d)})`;
       // Joining, or a new title: the stream they start on.
@@ -262,9 +263,9 @@ export function eventText(e: PlayEvent, ctx?: EventContext): string {
       const why = did ? `after the host ${did}` : WAITED_FOR[String(d.why)] ?? (d.why ? `(${String(d.why)})` : "");
       return `Playback waited ${secs(d.ms)} for the host's video${why ? ` ${why}` : ""}`;
     }
-    case "buffering": return `${who} was buffering for ${secs(d.ms)}`;
-    case "loaded after seek": return `${who}'s player took ${secs(d.ms)} to load after a seek`;
-    case "loaded at start": return `${who}'s player took ${secs(d.ms)} to load at the start`;
+    case "buffering": return `Buffering for ${who}: ${secs(d.ms)}`;
+    case "loaded after seek": return `Load after seek for ${who}: ${secs(d.ms)}`;
+    case "loaded at start": return `Initial load for ${who}: ${secs(d.ms)}`;
     case "player error": return `Player error for ${who}: ${d.msg ?? "unknown error"}`;
     default: return `${e.kind}${e.username ? ` (${e.username})` : ""}`;
   }
@@ -278,10 +279,10 @@ const DETAIL_LABELS: Record<string, string> = {
   subtitleStreamId: "Subtitles", quality: "Quality", engine: "Engine", fromOffsetS: "Previous start", toOffsetS: "New start",
   offsetS: "Starts at", msg: "Message", tag: "Source", session: "Stream session", replaced: "Replaced session",
   device: "Client", caps: "Supported formats", by: "Host before", target: "Host after", away: "Host away from Discord",
-  waitS: "Time to answer", soundEndsS: "Sound ends at", pictureEndsS: "Picture ends at", ratingKey: "Plex item",
+  waitS: "Time to respond", soundEndsS: "Audio ends at", pictureEndsS: "Video ends at", ratingKey: "Plex item",
 };
 /** Why a request for host ended with no answer. */
-const REQUEST_ENDED: Record<string, string> = { "asker left": "They left before it was answered", "host changed": "The host role moved first" };
+const REQUEST_ENDED: Record<string, string> = { "asker left": "Requester left before a response", "host changed": "Host changed before a response" };
 
 /** For a change of host or co-host, its details' labels where they differ. */
 const ROLE_LABELS: Record<string, string> = { why: "How" };
@@ -309,7 +310,7 @@ export function eventDetails(e: PlayEvent, ctx?: EventContext): Array<[string, s
   }
   if (d.byHost) out.push(["Changed by", "The host"]);
   if (d.unwatched) out.push(["Reason", "No viewers remained on it"]);
-  if (d.early) out.push(["Ended early", "Yes: the stream ended before the length Plex reports"]);
+  if (d.early) out.push(["Ended before duration", "Yes: the stream ended before the duration Plex reports"]);
   // The agent as the player gave it, for a client not named above.
   for (const ua of [d.device, e.kind === "switched client" ? d.to : null]) if (typeof ua === "string" && ua) out.push(["User agent", ua]);
   return out;

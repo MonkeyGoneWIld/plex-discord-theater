@@ -173,7 +173,7 @@ export async function cachesView(recorder: Recorder | null): Promise<{
       bytes: sum(runFolders),
       limitBytes: null,
       items: runFolders.length,
-      kept: `Removed when the stream ends. In memory: ${hot.segments} segments, ${mb(hot.bytes)} of ${mb(segmentMemoryBytes())} (FFMPEG_SEGMENT_MEMORY_MB).`,
+      kept: `Removed when the stream ends. In memory: ${hot.segments} ${hot.segments === 1 ? "segment" : "segments"}, ${mb(hot.bytes)} of ${mb(segmentMemoryBytes())} (FFMPEG_SEGMENT_MEMORY_MB).`,
       list: runFolders.slice(0, LIST).map((f) => {
         const play = sessionPlays.get(f.name);
         return {
@@ -273,5 +273,5 @@ export async function cachesView(recorder: Recorder | null): Promise<{
 }
 
 function mb(bytes: number): string {
-  return `${(bytes / 1024 / 1024).toFixed(bytes >= 100 * 1024 * 1024 ? 0 : 1)} MB`;
+  return `${(bytes / 1024 / 1024).toFixed(bytes >= 100 * 1024 * 1024 ? 0 : 1).replace(/\.0$/, "")} MB`;
 }

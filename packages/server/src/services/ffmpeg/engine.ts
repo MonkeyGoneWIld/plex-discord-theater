@@ -47,6 +47,7 @@ import { initTracks, mp4Span, type Mp4Track } from "../mp4-timestamps.js";
 import { directStreamCacheDir, type CopiedSegment } from "../direct-stream.js";
 import { measuredPlaylist, round3, type MeasuredSegment } from "../measured-playlist.js";
 import { logEvent } from "../logger.js";
+import { adminHooks } from "../admin-hooks.js";
 import { LruMap } from "../lru.js";
 import { streamBandwidth, type Bandwidth } from "../stream-bandwidth.js";
 import { ffmpegPath, lookaheadS, maxEncodes } from "./config.js";
@@ -354,6 +355,8 @@ function fail(run: Run, why: string): void {
     fromS: run.offsetS, stderr: run.stderrTail.slice(-6).join(" | ") || "none",
     leftToPlex: times.length >= CRASHES_TO_REFUSE,
   });
+  adminHooks.processing({ at: Date.now(), kind: "stream failed", hlsSessionId: run.sessionId, ratingKey: run.ratingKey,
+    ms: Date.now() - run.startedAt, ok: false, detail: { encode: run.encode, why, fromS: round3(run.offsetS), segments: run.segments.length } });
   try {
     run.proc?.kill("SIGKILL");
   } catch {
@@ -523,6 +526,8 @@ async function measure(run: Run, name: string): Promise<void> {
       audioLeadS: span.audioStart === null ? "none" : round3(span.start - span.audioStart),
       ms: Date.now() - run.startedAt,
     });
+    adminHooks.processing({ at: Date.now(), kind: "first segment", hlsSessionId: run.sessionId, ratingKey: run.ratingKey,
+      ms: Date.now() - run.startedAt, ok: true, detail: { encode: run.encode, fromS: round3(run.offsetS) } });
     if (run.encode && run.proc?.pid) run.gpuAtStart = sampleGpu(run.proc.pid);
     // A plain I-frame where a copy opens: an open-GOP Blu-ray, which browsers
     // can't start from in MPEG-TS (keyframes.ts). One the file's own check
@@ -902,11 +907,15 @@ export async function startFfmpegRun(o: {
       if (run.stopped || run.failed) return;
       if (code === 0) {
         run.ended = true;
+        const made = speed(run);
         logEvent("FFmpeg", "reached the end of the file", {
           session: short(run.sessionId), encode: run.encode, segments: run.segments.length,
-          endS: round3(edgeOf(run)), ...speed(run),
+          endS: round3(edgeOf(run)), ...made,
           ...(run.gpuLately ? use(run, run.gpuLately) : {}),
         });
+        adminHooks.processing({ at: Date.now(), kind: "whole file", hlsSessionId: run.sessionId, ratingKey: run.ratingKey,
+          ms: Math.round(made.tookS * 1000), ok: true,
+          detail: { encode: run.encode, fromS: round3(run.offsetS), endS: round3(edgeOf(run)), madeS: made.madeS, speedX: made.speedX } });
         notify(run);
         startBefore(run);
       } else {

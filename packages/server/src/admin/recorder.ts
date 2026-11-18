@@ -1,10 +1,14 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import Database from "better-sqlite3";
 import { overview, type ClientView, type Overview, type RoomView, type StreamView, type ViewerData } from "./data.js";
 import { instanceHosts } from "../routes/discord.js";
-import type { ClientLogEntry, ClientLogEvent, HostRequestEvent, PlaceEvent, RequestEvent, SentEvent, StreamIssueEvent, TransportEvent } from "../services/admin-hooks.js";
+import type {
+  ClientLogEntry, ClientLogEvent, HostRequestEvent, PlaceEvent, ProcessingEvent, RequestEvent, SentEvent, StreamIssueEvent, TransportEvent,
+} from "../services/admin-hooks.js";
 import { zoneClock } from "./zone.js";
+import { systemSampler, type SystemSample } from "./system.js";
 
 /**
  * The admin page's history (admin.sqlite): every play of a title in a room,
@@ -78,6 +82,8 @@ export interface RecorderOptions {
   source?: (now: number) => Overview;
   /** Activity launches: routes/discord.ts's instanceHosts. */
   instances?: () => ReadonlyMap<string, Instance>;
+  /** The server's load, sampled once a minute (system.ts); null records none. */
+  system?: () => SystemSample | null;
 }
 
 interface ViewerTotals {
@@ -424,6 +430,60 @@ CREATE TABLE IF NOT EXISTS play_shares (
   bytes INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (play_id, from_user, to_user)
 );
+-- Each viewer's player in a play, every 10 seconds (its Health sample): its
+-- offset from the room (null for the host), what it had downloaded ahead and
+-- in the browser's buffer, what it had from the server (bot), Discord's cache
+-- (hit) and other viewers (p2p) and sent them (up) since its last sample, the
+-- frames it showed and dropped since then, its memory, its peers and its
+-- playback rate while correcting drift.
+CREATE TABLE IF NOT EXISTS play_health (
+  play_id INTEGER NOT NULL,
+  user_id TEXT NOT NULL,
+  at INTEGER NOT NULL,
+  drift_s REAL,
+  ahead_s REAL,
+  buffer_s REAL,
+  bot_bytes INTEGER NOT NULL DEFAULT 0,
+  hit_bytes INTEGER NOT NULL DEFAULT 0,
+  p2p_bytes INTEGER NOT NULL DEFAULT 0,
+  up_bytes INTEGER NOT NULL DEFAULT 0,
+  frames_shown INTEGER,
+  frames_dropped INTEGER,
+  heap_mb REAL,
+  peers INTEGER,
+  rate_x REAL
+);
+CREATE INDEX IF NOT EXISTS play_health_play ON play_health(play_id, at);
+-- How long each step of preparing a title or making its stream took
+-- (services/admin-hooks.ts ProcessingKind), for the stream it served when
+-- there was one.
+CREATE TABLE IF NOT EXISTS processing (
+  id INTEGER PRIMARY KEY,
+  at INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  hls_session_id TEXT,
+  rating_key TEXT,
+  ms INTEGER NOT NULL,
+  ok INTEGER NOT NULL,
+  detail TEXT
+);
+CREATE INDEX IF NOT EXISTS processing_at ON processing(at);
+CREATE INDEX IF NOT EXISTS processing_title ON processing(rating_key, at);
+CREATE INDEX IF NOT EXISTS processing_session ON processing(hls_session_id);
+-- The server's load, each minute: the machine's CPU and memory, the bot's
+-- CPU share and memory, the load average, and at most the streams running,
+-- the transcodes among them and the viewers watching.
+CREATE TABLE IF NOT EXISTS system_load (
+  minute INTEGER PRIMARY KEY,
+  cpu_pct REAL,
+  bot_cpu_pct REAL,
+  mem_pct REAL,
+  rss_mb REAL,
+  load1 REAL,
+  streams INTEGER NOT NULL DEFAULT 0,
+  encodes INTEGER NOT NULL DEFAULT 0,
+  viewers INTEGER NOT NULL DEFAULT 0
+);
 -- Discord servers' and channels' names.
 CREATE TABLE IF NOT EXISTS places (
   id TEXT PRIMARY KEY,
@@ -464,6 +524,9 @@ export class Recorder {
   readonly startedAt: number;
   private readonly db: Database.Database;
   private readonly now: () => number;
+  private readonly system: () => SystemSample | null;
+  /** The minute the machine's load was last sampled in. */
+  private loadMinute = -1;
   private readonly source: (now: number) => Overview;
   private readonly instances: () => ReadonlyMap<string, Instance>;
   private readonly statements = new Map<string, Database.Statement>();
@@ -483,6 +546,7 @@ export class Recorder {
 
   constructor(opts: RecorderOptions) {
     this.now = opts.now ?? Date.now;
+    this.system = opts.system ?? systemSampler();
     this.source = opts.source ?? overview;
     this.instances = opts.instances ?? (() => instanceHosts);
     this.startedAt = this.now();
@@ -575,9 +639,36 @@ export class Recorder {
         }
       }
       if (watching || feeds) this.traffic(at, { viewers: watching, streams: feeds, feedKbps });
+      this.load(at, ov.rooms, watching);
       for (const play of this.open.values()) this.flushViewers(play);
       for (const [key, p] of this.players) if (at - p.lastAt > PLAYER_FORGET_MS) this.players.delete(key);
     })();
+  }
+
+  /**
+   * The minute's streams running, transcodes among them and viewers (at most,
+   * look by look), and once a minute the machine's load (system.ts).
+   */
+  private load(at: number, rooms: RoomView[], watching: number): void {
+    const minute = Math.floor(at / 60_000);
+    let streams = 0;
+    let encodes = 0;
+    for (const r of rooms) {
+      for (const s of r.streams) {
+        if (!s.hlsSessionId) continue;
+        streams++;
+        if (s.decision === "transcode") encodes++;
+      }
+    }
+    this.st(`INSERT INTO system_load (minute, streams, encodes, viewers) VALUES (?, ?, ?, ?)
+             ON CONFLICT (minute) DO UPDATE SET streams = MAX(streams, excluded.streams), encodes = MAX(encodes, excluded.encodes),
+               viewers = MAX(viewers, excluded.viewers)`).run(minute, streams, encodes, watching);
+    if (minute === this.loadMinute) return;
+    this.loadMinute = minute;
+    const s = this.system();
+    if (!s) return;
+    this.st("UPDATE system_load SET cpu_pct = ?, bot_cpu_pct = ?, mem_pct = ?, rss_mb = ?, load1 = ? WHERE minute = ?")
+      .run(s.cpuPct, s.botCpuPct, s.memPct, s.rssMb, s.load1, minute);
   }
 
   private recordLaunches(at: number): void {
@@ -1109,6 +1200,16 @@ export class Recorder {
     this.shares(now.play, userId, p);
     const got = Math.max(0, delta.http);
     const hit = Math.min(got, Math.max(0, delta.edgeHit));
+    const real = (v: unknown, places = 1) => {
+      const n = num(v);
+      return Number.isFinite(n) ? Math.round(n * 10 ** places) / 10 ** places : null;
+    };
+    const whole = (v: unknown) => (Number.isFinite(num(v)) ? Math.round(num(v)) : null);
+    this.st(`INSERT INTO play_health (play_id, user_id, at, drift_s, ahead_s, buffer_s, bot_bytes, hit_bytes, p2p_bytes, up_bytes,
+               frames_shown, frames_dropped, heap_mb, peers, rate_x) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(now.play.id, userId, entry.t, p.driftS, p.aheadS, real(d.bufAheadS), Math.round(got - hit), Math.round(hit),
+        Math.round(Math.max(0, delta.p2p)), Math.round(Math.max(0, delta.up)), whole(d.framesShown), whole(d.framesDropped),
+        real(d.heapUsedMB), whole(d.peers), d.rateX === undefined ? null : real(d.rateX, 3));
     if (got || delta.p2p > 0) {
       this.traffic(entry.t, { bot: got - hit, hit, p2p: Math.max(0, delta.p2p) });
       this.st(`INSERT INTO play_flow (play_id, minute, bot_bytes, hit_bytes, p2p_bytes) VALUES (?, ?, ?, ?, ?)
@@ -1319,6 +1420,45 @@ export class Recorder {
 
   /** Each viewer's totals in their room's play so far, for the Now playing page. */
   /** One more look at what a room's players have had, for its graph. */
+  /** A step of preparing a title or making its stream, and how long it took. */
+  processing(e: ProcessingEvent): void {
+    if (this.closed) return;
+    this.st("INSERT INTO processing (at, kind, hls_session_id, rating_key, ms, ok, detail) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run(e.at, e.kind, e.hlsSessionId ?? null, e.ratingKey ?? null, Math.max(0, Math.round(e.ms)), e.ok ? 1 : 0,
+        json(e.detail && Object.keys(e.detail).length ? e.detail : null));
+  }
+
+  /**
+   * The server's load over a period, a step at a time (each a minute or more):
+   * the machine's CPU and memory on average and at most, the bot's, the load
+   * average, and at most the streams, transcodes and viewers.
+   */
+  systemLoad(opts: { hours?: unknown } = {}, now = this.now()) {
+    const hours = Math.min(24 * 90, Math.max(1, Math.floor(Number(opts.hours) || 24)));
+    const from = now - hours * HOUR_MS;
+    // About 360 steps, whole minutes each.
+    const step = Math.max(1, Math.round((hours * 60) / 360));
+    const rows = this.st(`SELECT (minute / @step) * @step AS m, AVG(cpu_pct) AS cpu, MAX(cpu_pct) AS cpu_max, AVG(bot_cpu_pct) AS bot,
+        AVG(mem_pct) AS mem, MAX(mem_pct) AS mem_max, MAX(rss_mb) AS rss, AVG(load1) AS load1,
+        MAX(streams) AS streams, MAX(encodes) AS encodes, MAX(viewers) AS viewers
+      FROM system_load WHERE minute >= @from AND minute < @to GROUP BY m ORDER BY m`)
+      .all({ step, from: Math.floor(from / 60_000), to: Math.ceil(now / 60_000) }) as Array<Record<string, number | null>>;
+    const r1 = (v: number | null) => (v === null ? null : Math.round(v * 10) / 10);
+    // What the bot's port sent, as bits a second, over the same steps.
+    const sent = new Map((this.st(`SELECT (minute / @step) * @step AS m, SUM(sent_bytes) AS b FROM traffic
+        WHERE minute >= @from AND minute < @to GROUP BY m`).all({ step, from: Math.floor(from / 60_000), to: Math.ceil(now / 60_000) }) as
+      Array<{ m: number; b: number }>).map((r) => [r.m, r.b] as const));
+    return {
+      from, to: now, stepMs: step * 60_000, cores: os.cpus().length, memTotalMb: Math.round(os.totalmem() / 1e6),
+      points: rows.map((r) => ({
+        at: Number(r.m) * 60_000, cpuPct: r1(r.cpu), cpuMaxPct: r1(r.cpu_max), botCpuPct: r1(r.bot), memPct: r1(r.mem), memMaxPct: r1(r.mem_max),
+        rssMb: r1(r.rss), load1: r.load1 === null ? null : Math.round(r.load1 * 100) / 100,
+        streams: Number(r.streams ?? 0), encodes: Number(r.encodes ?? 0), viewers: Number(r.viewers ?? 0),
+        sentBps: Math.round(((sent.get(Number(r.m)) ?? 0) * 8) / (step * 60)),
+      })),
+    };
+  }
+
   private sampleFlow(roomId: string, at: number): void {
     const play = this.open.get(roomId);
     if (!play) return;
@@ -1388,7 +1528,9 @@ export class Recorder {
   play(id: number) {
     const r = this.st(`SELECT p.*, ${HOST_NAME} FROM plays p WHERE p.id = ?`).get(id) as Record<string, unknown> | undefined;
     if (!r) return null;
-    const viewers = (this.st("SELECT * FROM play_viewers WHERE play_id = ? ORDER BY first_seen").all(id) as Array<Record<string, unknown>>)
+    // The host the session started with first, then everyone else as they joined.
+    const viewers = (this.st("SELECT * FROM play_viewers WHERE play_id = ? ORDER BY user_id IS ? DESC, first_seen")
+      .all(id, (r.host_user_id as string | null) ?? null) as Array<Record<string, unknown>>)
       .map((v) => ({
         userId: String(v.user_id), username: (v.username as string | null) ?? null, role: (v.role as string | null) ?? null,
         firstSeen: Number(v.first_seen), lastSeen: Number(v.last_seen),
@@ -1454,7 +1596,26 @@ export class Recorder {
       Array<{ minute: number; bot_bytes: number; hit_bytes: number; p2p_bytes: number }>)
       .map((m): [number, number, number, number] => [m.minute * 60_000, Number(m.bot_bytes), Number(m.hit_bytes), Number(m.p2p_bytes)]);
     const positions = Object.fromEntries(byViewer);
-    return { play, viewers, streams, events, lead, track, watched, shares, flow, positions };
+    // Each viewer's player every 10 seconds: [time, offset from the room, downloaded ahead, browser buffer,
+    // from the server, from Discord's cache, from other viewers, sent to them, frames shown, frames dropped,
+    // memory in MB, peers, playback rate].
+    const health: Record<string, HealthPoint[]> = {};
+    for (const h of this.st("SELECT * FROM play_health WHERE play_id = ? ORDER BY at, rowid").all(id) as Array<Record<string, number | null>>) {
+      const uid = String(h.user_id);
+      (health[uid] ??= []).push([Number(h.at), h.drift_s, h.ahead_s, h.buffer_s, Number(h.bot_bytes), Number(h.hit_bytes),
+        Number(h.p2p_bytes), Number(h.up_bytes), h.frames_shown, h.frames_dropped, h.heap_mb, h.peers, h.rate_x]);
+    }
+    // Its streams' preparation, and the title's around it that served no stream (subtitles, previews).
+    const processing = (this.st(`SELECT * FROM processing
+        WHERE hls_session_id IN (SELECT hls_session_id FROM play_streams WHERE play_id = @id)
+          OR (rating_key = @rk AND at >= @from AND at <= @to
+            AND (hls_session_id IS NULL OR hls_session_id NOT IN (SELECT hls_session_id FROM play_streams WHERE hls_session_id IS NOT NULL)))
+        ORDER BY at, id`)
+      .all({ id, rk: play.ratingKey, from: play.startedAt - PROCESSING_LEAD_MS, to: (play.endedAt ?? this.now()) + 120_000 }) as
+      Array<Record<string, unknown>>)
+      .map((p) => ({ id: Number(p.id), at: Number(p.at), kind: String(p.kind), hlsSessionId: (p.hls_session_id as string | null) ?? null,
+        ms: Number(p.ms), ok: !!p.ok, detail: (parse(p.detail) as Record<string, unknown> | null) ?? {} }));
+    return { play, viewers, streams, events, lead, track, watched, shares, flow, positions, health, processing };
   }
 
   usage(opts: { limit?: unknown; before?: unknown } = {}) {
@@ -1946,8 +2107,47 @@ export class Recorder {
     const problemTitles = [...problems.values()].sort((a, b) => b.lastAt - a.lastAt).slice(0, 50)
       .map(({ plays: ps, ...p }) => ({ ...p, sessions: ps.size }));
 
+    // How long each processing step took in the period, by whether it was a transcode where that is said;
+    // and the median time to the first segment, bucket by bucket.
+    const steps = new Map<string, { kind: string; encode: boolean | null; ms: number[]; failed: number }>();
+    const firstBy = new Map<string, number[]>();
+    for (const r of rows(`SELECT kind, ms, ok, json_extract(detail, '$.encode') AS encode, ${bucketOf("at")} AS d
+        FROM processing WHERE at >= @from AND at < @to`)) {
+      const encode = r.encode === null || r.encode === undefined ? null : !!int(r.encode);
+      const k = `${String(r.kind)}|${encode}`;
+      let s = steps.get(k);
+      if (!s) steps.set(k, (s = { kind: String(r.kind), encode, ms: [], failed: 0 }));
+      if (int(r.ok)) s.ms.push(int(r.ms));
+      else s.failed++;
+      if (String(r.kind) === "first segment" && int(r.ok)) {
+        const fk = `${int(r.d)}|${encode ? "transcode" : "copy"}`;
+        (firstBy.get(fk) ?? firstBy.set(fk, []).get(fk)!).push(int(r.ms));
+      }
+    }
+    const at = (sorted: number[], q: number) => sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * q))];
+    const processing = [...steps.values()].map((s) => {
+      const ms = [...s.ms].sort((a, b) => a - b);
+      return { kind: s.kind, encode: s.encode, count: ms.length, failed: s.failed,
+        avgMs: ms.length ? Math.round(ms.reduce((a, b) => a + b, 0) / ms.length) : null,
+        p50Ms: ms.length ? at(ms, 0.5) : null, p95Ms: ms.length ? at(ms, 0.95) : null, maxMs: ms.length ? ms[ms.length - 1] : null };
+    }).sort((a, b) => a.kind.localeCompare(b.kind) || Number(a.encode) - Number(b.encode));
+    const processingDays = [...firstBy].map(([k, ms]) => {
+      const [d, way] = k.split("|");
+      const sorted = [...ms].sort((a, b) => a - b);
+      return { day: Number(d) * size, way: way as "copy" | "transcode", p50Ms: at(sorted, 0.5), count: sorted.length };
+    }).sort((a, b) => a.day - b.day);
+    // Watch time by Discord server, bucket by bucket.
+    const serverDays = rows(`SELECT ${bucketOf("p.started_at")} AS d, p.guild_id AS g, COUNT(DISTINCT p.id) AS plays,
+        COALESCE(SUM(v.watched_s), 0) AS watched
+      FROM plays p LEFT JOIN play_viewers v ON v.play_id = p.id WHERE p.started_at >= @from AND p.started_at < @to GROUP BY d, g`)
+      .map((r) => ({ day: int(r.d) * size, guildId: (r.g as string | null) ?? null, plays: int(r.plays), watchedS: Math.round(int(r.watched)) }));
+    // Requests by outcome, bucket by bucket.
+    const requestDays = rows(`SELECT ${bucketOf("at")} AS d, outcome, COUNT(*) AS n FROM requests WHERE at >= @from AND at < @to GROUP BY d, outcome`)
+      .map((r) => ({ day: int(r.d) * size, outcome: String(r.outcome), requests: int(r.n) }));
+
     return { days, lastHours, bucket, zone: zone.zone, from, to, totals, daily, hours, weekdays, titles,
-      people: topPeople, sharers, pairs, servers, reasons, upload, reasonDays, heat, clients, problems: problemTitles };
+      people: topPeople, sharers, pairs, servers, reasons, upload, reasonDays, heat, clients, problems: problemTitles,
+      processing, processingDays, serverDays, requestDays };
   }
 
   /** The history file: how big it is, what it holds, and from when. */
@@ -2006,7 +2206,10 @@ export class Recorder {
       this.st(`DELETE FROM play_viewers WHERE play_id IN (SELECT p.id FROM plays p WHERE ${OLD_PLAY})`).run({ before });
       this.st(`DELETE FROM positions WHERE play_id IN (SELECT p.id FROM plays p WHERE ${OLD_PLAY})`).run({ before });
       this.st(`DELETE FROM play_flow WHERE play_id IN (SELECT p.id FROM plays p WHERE ${OLD_PLAY})`).run({ before });
+      this.st(`DELETE FROM play_health WHERE play_id IN (SELECT p.id FROM plays p WHERE ${OLD_PLAY})`).run({ before });
+      this.st("DELETE FROM processing WHERE at < @before").run({ before });
       this.st("DELETE FROM traffic WHERE minute < @minute").run({ minute: Math.floor(before / 60_000) });
+      this.st("DELETE FROM system_load WHERE minute < @minute").run({ minute: Math.floor(before / 60_000) });
       this.st(`DELETE FROM play_streams WHERE play_id IN (SELECT p.id FROM plays p WHERE ${OLD_PLAY})`).run({ before });
       this.st(`DELETE FROM plays WHERE id IN (SELECT p.id FROM plays p WHERE ${OLD_PLAY})`).run({ before });
       this.st("DELETE FROM usage WHERE at < @before").run({ before });
@@ -2025,6 +2228,13 @@ export class Recorder {
     return this.db.serialize();
   }
 }
+
+/** A title's preparation this long before its session began is the session's: a picture subtitle extracted ahead, previews. */
+const PROCESSING_LEAD_MS = 15 * 60_000;
+
+/** A viewer's player at one sample: see Recorder.play's `health`. */
+export type HealthPoint = [number, number | null, number | null, number | null, number, number, number, number,
+  number | null, number | null, number | null, number | null, number | null];
 
 /** A play to remove when trimming (as p): ended, before @before. */
 const OLD_PLAY = "p.ended_at IS NOT NULL AND p.ended_at < @before";
@@ -2086,6 +2296,15 @@ export interface UploadRates {
 }
 
 export interface Graphs {
+  /** How long each processing step took (services/admin-hooks.ts ProcessingKind), by transcode or not where that is said. */
+  processing: Array<{ kind: string; encode: boolean | null; count: number; failed: number; avgMs: number | null; p50Ms: number | null;
+    p95Ms: number | null; maxMs: number | null }>;
+  /** The median time from ffmpeg starting to its first segment, bucket by bucket, for copies and transcodes. */
+  processingDays: Array<{ day: number; way: "copy" | "transcode"; p50Ms: number; count: number }>;
+  /** Sessions and watch time by Discord server, bucket by bucket. */
+  serverDays: Array<{ day: number; guildId: string | null; plays: number; watchedS: number }>;
+  /** Requests by outcome, bucket by bucket. */
+  requestDays: Array<{ day: number; outcome: string; requests: number }>;
   /** Each transcode reason, bucket by bucket (the bucket's start, as GraphDay.day). */
   reasonDays: Array<{ day: number; reason: string; streams: number }>;
   /** Sessions by weekday (Sunday 0) and hour together, local time. */

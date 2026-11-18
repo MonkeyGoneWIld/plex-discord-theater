@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { api } from "./api";
 import type { TitleRequest } from "./types";
-import { dateTime } from "./format";
+import { dayTime } from "./format";
 import { Downloads, useLoad, Who } from "./parts";
+import { MiniChart } from "./lazy";
 
 const PAGE = 50;
 
@@ -14,7 +15,7 @@ function seasons(s: TitleRequest["seasons"]): string {
 
 /** Seerr's media status, which a request made answers with. */
 const MEDIA_STATUS: Record<number, string> = {
-  1: "Unknown", 2: "Pending", 3: "Processing", 4: "Partly available", 5: "Available", 6: "Blocklisted", 7: "Deleted",
+  1: "Unknown", 2: "Pending", 3: "Processing", 4: "Partially available", 5: "Available", 6: "Blocklisted", 7: "Deleted",
 };
 
 /** A request's state now, as Seerr has it: [label, tone]. Null when Seerr wasn't reached. */
@@ -39,19 +40,20 @@ function said(r: TitleRequest) {
     if (now) return <span className={`badge ${now[1]}`} title={then ? `When requested: ${then}` : undefined}>{now[0]}</span>;
     return then ? <span className="muted" title="Current status unavailable: Seerr could not be reached">{then} (when requested)</span> : "—";
   }
-  return (
-    <>
-      {r.status !== null && <span className="mono">HTTP {r.status}</span>}
-      {r.error && <div className="muted">{r.error}</div>}
-      {r.status === null && !r.error && "—"}
-    </>
-  );
+  // A failed request never reached Seerr's queue; why it failed is under Result.
+  return "—";
 }
 
 function outcome(r: TitleRequest) {
   if (r.outcome === "requested") return <span className="badge good">Requested</span>;
   if (r.outcome === "already requested") return <span className="badge info">Already requested</span>;
-  return <span className="badge bad" title={r.error ?? undefined}>Failed</span>;
+  const why = [r.status !== null ? `HTTP ${r.status}` : null, r.error].filter(Boolean).join(" · ");
+  return (
+    <>
+      <span className="badge bad">Failed</span>
+      {why && <div className="muted small request-why">{why}</div>}
+    </>
+  );
 }
 
 /** Requests sent to Seerr, in a table; a failure says what Seerr answered. */
@@ -68,7 +70,7 @@ export function RequestRows({ requests, showWho = true }: { requests: TitleReque
         <tbody>
           {requests.map((r) => (
             <tr key={r.id}>
-              <td className="nowrap">{dateTime(r.at)}</td>
+              <td className="nowrap">{dayTime(r.at)}</td>
               {showWho && <td><Who id={r.userId} name={r.username} /></td>}
               {showWho && <td className="mono">{r.userId ?? "—"}</td>}
               <td><strong>{r.title ?? "Unknown title"}</strong></td>
@@ -98,6 +100,7 @@ export function Requests({ onError }: { onError: (e: unknown) => void }) {
         <h1>Requests</h1>
         <p className="muted">All titles requested through Seerr from the Activity, newest first.</p>
       </div>
+      <MiniChart kind="requests" onError={onError} />
     <section className="card">
       <form className="toolbar" onSubmit={(e) => { e.preventDefault(); setQuery(q); setPages([undefined]); }}>
         <label className="grow">

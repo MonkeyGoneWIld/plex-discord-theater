@@ -9,6 +9,7 @@ import { createPreviewMotion, type SpeedTier } from "../lib/previewMotion";
 import { loadVolume } from "../lib/volume";
 import { previewPassPath, previewVersionOf, rememberPreviewVersion, takePreviewStart } from "../lib/previewPrefetch";
 import { previewKey, sideShare } from "../lib/sideShare";
+import { intentHolds, intentRecheckMs, shownPlaying, type PressIntent } from "../lib/pressIntent";
 import { dropParkedPreview, parkPreview, takeParkedPreview } from "../lib/previewKeep";
 import type { PreviewPass, PreviewStatus } from "../lib/previewStatus";
 import { getLevel, setLevel, boostAvailable, BOOST_ACCENT, MAX_LEVEL } from "../lib/audioBoost";
@@ -32,6 +33,12 @@ export interface ControlsHandle {
    * the video's own click handler each see the same tap.
    */
   consumeRevealTap: () => boolean;
+  /**
+   * Play (true) or pause (false) was pressed somewhere other than this bar —
+   * the picture, the keyboard — and the button shows it until the player has
+   * done it (lib/pressIntent).
+   */
+  noteIntent: (playing: boolean) => void;
 }
 
 interface ControlsProps {
@@ -504,8 +511,21 @@ export function Controls({
   previewStatusRef,
 }: ControlsProps) {
   const [elementPlaying, setPlaying] = useState(false);
+  // What was last pressed, shown on the button until the player has done it:
+  // one press, one change, however many replies the room sends on the way.
+  const [intent, setIntent] = useState<PressIntent | null>(null);
+  const [intentCheck, setIntentCheck] = useState(0);
+  const noteIntent = useCallback((p: boolean) => setIntent({ playing: p, at: Date.now() }), []);
+  useEffect(() => {
+    if (!intent) return;
+    if (!intentHolds(intent, elementPlaying, Date.now())) { setIntent(null); return; }
+    const t = setTimeout(() => setIntentCheck((n) => n + 1), intentRecheckMs(intent, Date.now()) + 10);
+    return () => clearTimeout(t);
+  }, [intent, elementPlaying, intentCheck]);
+  // Another title, or the room's control gone: nothing pressed is waiting.
+  useEffect(() => { setIntent(null); }, [title, canControl]);
   // Held for the room is playing, from here — see `held`.
-  const playing = elementPlaying || held;
+  const playing = shownPlaying(intent, elementPlaying, held, Date.now());
   // Latched on the first play, and never cleared: the preview prefetch below
   // wants "this stream has begun", not "playing right now". Keying it on
   // `playing` would throw the frames away on every pause and fetch them again
@@ -843,14 +863,16 @@ export function Controls({
   const togglePlay = useCallback(() => {
     const video = videoRef.current;
     if (!video || !canControl) return;
-    if (video.paused && !held) {
+    const resuming = video.paused && !held;
+    noteIntent(resuming);
+    if (resuming) {
       if (onSyncResume) onSyncResume(video.currentTime);
       else video.play();
     } else {
       video.pause();
       onSyncPause?.(video.currentTime);
     }
-  }, [videoRef, canControl, held, onSyncPause, onSyncResume]);
+  }, [videoRef, canControl, held, onSyncPause, onSyncResume, noteIntent]);
 
   /** Where along the bar a client X coordinate falls, 0-1. Null if unmeasurable. */
   const pctFromClientX = useCallback((clientX: number): number | null => {
@@ -955,8 +977,8 @@ export function Controls({
     return was;
   }, []);
 
-  useImperativeHandle(handleRef, () => ({ queueSkip, consumeRevealTap }),
-    [queueSkip, consumeRevealTap]);
+  useImperativeHandle(handleRef, () => ({ queueSkip, consumeRevealTap, noteIntent }),
+    [queueSkip, consumeRevealTap, noteIntent]);
 
   /**
    * A tap on the picture, on a phone. Never plays or pauses.

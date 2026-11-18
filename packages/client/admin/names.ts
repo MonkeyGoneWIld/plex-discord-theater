@@ -10,7 +10,7 @@ import type { PlaceNames } from "./types";
  *
  * Asked for again every 15 seconds while a page shows them, and within 5 of
  * one being shown without a name. They used to be asked for only as a page
- * opened, so Now Playing, which stays open, showed a new channel's ID until
+ * opened, so Activity, which stays open, showed a new channel's ID until
  * the page was left and opened again.
  */
 let known: PlaceNames = { guilds: {}, channels: {} };

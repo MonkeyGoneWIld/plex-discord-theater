@@ -306,6 +306,11 @@ export async function probeOnce(key: string, input: string[]): Promise<Probed | 
   return probed;
 }
 
+/** Whether a file's streams have been asked for already: its answer is kept. */
+export function probedAlready(key: string): boolean {
+  return checked.has(key);
+}
+
 /** For tests: forget every file's answer. */
 export function forgetProbes(): void {
   checked.clear();

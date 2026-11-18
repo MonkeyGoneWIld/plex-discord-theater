@@ -126,10 +126,11 @@ flowchart LR
   subtitles in the player without burning them in, and makes seek previews
   for files Plex has none for.
   [More →](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/FFmpeg-Engine)
-- **Dashboard.** An optional page on its own port, for you only. It shows what
-  is playing right now, who is watching, why each stream is direct or
-  transcoded, and where the data is coming from, with a full history,
-  statistics, users, requests, caches and logs.
+- **Theater Dashboard.** An optional page on its own port, for you only. It
+  shows the sessions in progress, who is watching, whether each stream is
+  direct play, direct stream or transcode and why, and where each player's
+  data comes from, with a full history of every session, statistics, users,
+  requests, caches, logs and server load.
   [More →](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Dashboard)
 - **qBittorrent upload limits.** The optional
   [plex-qbt-manager](https://github.com/MonkeyGoneWIld/plex-qbt-manager) makes
@@ -137,7 +138,7 @@ flowchart LR
 - **Private by design.** Plex tokens never reach a browser, and the Activity
   can be limited to your own Discord servers.
 
-![The Theater Dashboard's Now Playing page: a session with its delivery graph, its stream and its viewers](docs/screenshots/dashboard-now-playing.png)
+![The Theater Dashboard's Activity page: a session in progress with its figures, streams and viewers](docs/screenshots/dashboard-now-playing.png)
 
 ## Quick start
 

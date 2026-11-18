@@ -263,6 +263,43 @@ export interface PlayDetail {
   flow?: Array<[number, number, number, number]>;
   /** Each viewer's own position over the session, by user id. */
   positions?: Record<string, TrackPoint[]>;
+  /** Each viewer's player every 10 seconds, by user id (sessions recorded from this version on). */
+  health?: Record<string, HealthPoint[]>;
+  /** How long each step of preparing the title and its streams took. */
+  processing?: ProcessingStep[];
+}
+
+/**
+ * A viewer's player at one sample: [time, offset from the room in seconds (null for the host), downloaded
+ * ahead in seconds, browser buffer in seconds, bytes from the server, from Discord's cache, from other
+ * viewers and sent to them since the sample before, frames shown, frames dropped, memory in MB, peers,
+ * playback rate].
+ */
+export type HealthPoint = [number, number | null, number | null, number | null, number, number, number, number,
+  number | null, number | null, number | null, number | null, number | null];
+
+export type ProcessingKind = "probe" | "stream setup" | "first segment" | "whole file" | "stream failed" | "subtitle"
+  | "subtitle window" | "picture subtitle" | "sidecar" | "previews";
+
+export interface ProcessingStep {
+  id: number;
+  at: number;
+  kind: ProcessingKind | string;
+  hlsSessionId: string | null;
+  ms: number;
+  ok: boolean;
+  detail: Record<string, unknown>;
+}
+
+/** The server's load over a period, a step at a time. */
+export interface SystemLoad {
+  from: number;
+  to: number;
+  stepMs: number;
+  cores: number;
+  memTotalMb: number;
+  points: Array<{ at: number; cpuPct: number | null; cpuMaxPct: number | null; botCpuPct: number | null; memPct: number | null;
+    memMaxPct: number | null; rssMb: number | null; load1: number | null; streams: number; encodes: number; viewers: number; sentBps: number }>;
 }
 
 export interface PersonSummary extends ViewerData {
@@ -433,6 +470,15 @@ export interface UploadRates {
 }
 
 export interface Graphs {
+  /** How long each processing step took, by transcode or not where that is said. */
+  processing?: Array<{ kind: string; encode: boolean | null; count: number; failed: number; avgMs: number | null; p50Ms: number | null;
+    p95Ms: number | null; maxMs: number | null }>;
+  /** The median time from ffmpeg starting to its first segment, bucket by bucket. */
+  processingDays?: Array<{ day: number; way: "copy" | "transcode"; p50Ms: number; count: number }>;
+  /** Sessions and watch time by Discord server, bucket by bucket. */
+  serverDays?: Array<{ day: number; guildId: string | null; plays: number; watchedS: number }>;
+  /** Requests by outcome, bucket by bucket. */
+  requestDays?: Array<{ day: number; outcome: string; requests: number }>;
   days: number;
   lastHours: number | null;
   /** What each of `daily` is: a day, or an hour for three days or less. */

@@ -90,7 +90,7 @@ check("  and the page knows it is signed in, and opening it renews the cookie",
 const unsignedSession = await fetch(`${origin}/api/session`);
 check("  signed out, no cookie is set", [await unsignedSession.json(), unsignedSession.headers.get("set-cookie")], [{ signedIn: false }, null]);
 const noHistory = await get("/api/history");
-check("  without a recorder, no history, and it says so", [noHistory.status, await noHistory.json()], [503, { error: "Nothing is recorded" }]);
+check("  without a recorder, no history, and it says so", [noHistory.status, await noHistory.json()], [503, { error: "History recording is off: no writable data folder" }]);
 check("  nor graphs, files or the history file",
   [(await get("/api/graphs")).status, (await get("/api/export/history.csv")).status, (await get("/api/history-file")).status], [503, 503, 503]);
 // The caches page works without the history: a seek-bar preview on disk.
@@ -295,7 +295,7 @@ console.log("\n— the history, from the live room —");
     ((await (await hget("/api/people/222")).json()) as Asked).requests.map((r) => r.current), [{ mediaStatus: 1, requestStatus: 3 }]);
   check("  a file it doesn't make",
     [(await hget("/api/export/nope.csv")).status, (await hget("/api/export/history.xml")).status, await (await hget("/api/export/history")).json()],
-    [404, 404, { error: "No such export" }]);
+    [404, 404, { error: "Export not found" }]);
   const copy = await hget("/api/export/admin.sqlite");
   const copyBytes = Buffer.from(await copy.arrayBuffer());
   check("the whole history file, to save",

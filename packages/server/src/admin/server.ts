@@ -88,7 +88,7 @@ export function createAdminApp(opts: AdminOptions): express.Express {
     const given = (req.body as { password?: unknown } | undefined)?.password;
     if (!passwordMatches(given, opts.password)) {
       logEvent("Admin", "dashboard sign-in failed: wrong password", { from: req.ip ?? "unknown" });
-      res.status(401).json({ error: "Wrong password" });
+      res.status(401).json({ error: "Incorrect password" });
       return;
     }
     const token = sessions.create();
@@ -135,7 +135,7 @@ export function createAdminApp(opts: AdminOptions): express.Express {
     const key = String(req.params.ratingKey);
     const poster = okRatingKey(key) ? await titles.poster(key).catch(() => null) : null;
     if (!poster) {
-      res.status(404).json({ error: "No poster" });
+      res.status(404).json({ error: "Poster not found" });
       return;
     }
     res.setHeader("Content-Type", poster.type);
@@ -198,7 +198,7 @@ export function createAdminApp(opts: AdminOptions): express.Express {
       to: ms(q.to),
     });
     if (!result) {
-      res.status(404).json({ error: "No such log file" });
+      res.status(404).json({ error: "Log file not found" });
       return;
     }
     res.json({ file: name, ...result });
@@ -212,7 +212,7 @@ export function createAdminApp(opts: AdminOptions): express.Express {
   // ?before=<the last id shown> for the next.
   const recorded = (req: Request, res: Response, next: () => void) => {
     if (recorder) next();
-    else res.status(503).json({ error: "Nothing is recorded" });
+    else res.status(503).json({ error: "History recording is off: no writable data folder" });
   };
   app.get("/api/history", admin, recorded, (req: Request, res: Response) => {
     res.json({ plays: recorder!.history({ limit: req.query.limit, before: req.query.before, q: req.query.q }) });
@@ -221,7 +221,7 @@ export function createAdminApp(opts: AdminOptions): express.Express {
     const id = Number(req.params.id);
     const play = Number.isInteger(id) && id > 0 ? recorder!.play(id) : null;
     if (!play) {
-      res.status(404).json({ error: "No such play" });
+      res.status(404).json({ error: "Session not found" });
       return;
     }
     res.json(play);
@@ -250,7 +250,7 @@ export function createAdminApp(opts: AdminOptions): express.Express {
     const id = String(req.params.id);
     const person = /^\d{1,25}$/.test(id) ? recorder!.person(id) : null;
     if (!person) {
-      res.status(404).json({ error: "Nobody by that ID" });
+      res.status(404).json({ error: "User not found" });
       return;
     }
     res.json({ ...person, requests: await withCurrent(person.requests) });
@@ -266,6 +266,10 @@ export function createAdminApp(opts: AdminOptions): express.Express {
   app.get("/api/graphs", admin, recorded, (req: Request, res: Response) => {
     const q = req.query;
     res.json(recorder!.graphs({ days: q.days, hours: q.hours, from: q.from, to: q.to, zone: q.tz }));
+  });
+  // The server's load over the last ?hours= hours (24 by default).
+  app.get("/api/system-load", admin, recorded, (req: Request, res: Response) => {
+    res.json(recorder!.systemLoad({ hours: req.query.hours }));
   });
   // The history file, and what removing what is older than ?days= days would remove.
   const trimDays = (v: unknown): number | null => {
@@ -301,7 +305,7 @@ export function createAdminApp(opts: AdminOptions): express.Express {
     }
     const m = /^([a-z]+)\.(csv|json)$/.exec(file);
     if (!m || !(EXPORTS as readonly string[]).includes(m[1])) {
-      res.status(404).json({ error: "No such export" });
+      res.status(404).json({ error: "Export not found" });
       return;
     }
     const format = m[2] as "csv" | "json";

@@ -1059,6 +1059,27 @@ check("a recorder that throws costs the room nothing", [adminHooks.on, adminRoom
   [true, "Ghost Stories 2"]);
 setAdminHooks(null);
 
+console.log("\n— a session's viewers, the host first —");
+{
+  // 18 November: History listed the host of Tokyo Godfathers last, after the
+  // three who had joined before them.
+  const hPath = path.join(process.env.THUMB_CACHE_DIR!, "host-first.sqlite");
+  const quiet = () => ({ at: 1_000_000, totals: {}, rooms: [] }) as unknown as Overview;
+  const hr = new Recorder({ dbPath: hPath, now: () => 1_000_000, instances: () => new Map(), system: () => null, source: quiet });
+  hr.close();
+  const db = new Database(hPath);
+  db.prepare(`INSERT INTO plays (id, room_id, rating_key, title, host_user_id, started_at, updated_at, ended_at, end_reason)
+    VALUES (1, 'R', '80003', 'Tokyo Godfathers', 'h', 1000, 9000, 9000, 'room closed')`).run();
+  const v = db.prepare("INSERT INTO play_viewers (play_id, user_id, username, role, first_seen, last_seen) VALUES (1, ?, ?, ?, ?, 9000)");
+  v.run("a", "alex", "viewer", 1000);
+  v.run("m", "marlowe", "viewer", 2000);
+  v.run("h", "robin", "host", 4000);
+  db.close();
+  const again = new Recorder({ dbPath: hPath, now: () => 1_000_000, instances: () => new Map(), system: () => null, source: quiet });
+  check("the host first, then everyone else as they joined", again.play(1)!.viewers.map((x) => x.username), ["robin", "alex", "marlowe"]);
+  again.close();
+}
+
 for (const ws of sockets) ws.terminate();
 closeWebSocketServer();
 server.close();

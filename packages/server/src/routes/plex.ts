@@ -64,11 +64,11 @@ import {
   ALL_CAPS, AUDIO_KBPS, aboveHd as aboveHdSize, HARDWARE_NAMES, NO_CAPS, copyArgs, copyNeeds, encodeArgs, encodeTargetKbps, hdrClass, hdrPicture, inputArgs, pickBurn,
   planCopy, planEncode, tonemapCurve, type AudioOut, type EncodeRequest, type PlayerCap, type PlayerCaps, type SourceStream, type SourceVersion,
 } from "../services/ffmpeg/plan.js";
-import { probe, probeExtradata, probeHdrMeta, probeOnce, soundPadTo, trackMismatch } from "../services/ffmpeg/probe.js";
+import { probe, probedAlready, probeExtradata, probeHdrMeta, probeOnce, soundPadTo, trackMismatch } from "../services/ffmpeg/probe.js";
 import { bitmapCodecOf, vobsubHeader } from "../services/ffmpeg/bitmap-subtitles.js";
 import { prepareBurn, sidecarOnMount } from "../services/ffmpeg/burn-files.js";
 import { madePreview, makePreview, previewBody, previewPartOf, rememberPreviewPart } from "../services/ffmpeg/previews.js";
-import { pgsAhead, pgsBytes, pgsIndexOf, pgsStatus, type PgsSource } from "../services/ffmpeg/picture-subtitles.js";
+import { pgsAhead, pgsBytes, pgsIndexOf, pgsStatus, pgsTitle, type PgsSource } from "../services/ffmpeg/picture-subtitles.js";
 import {
   fontFile, fontsOfFilm, fontUses, keptFontNames, styledAss, type SubtitleFont,
 } from "../services/ffmpeg/styled-subtitles.js";
@@ -3162,6 +3162,7 @@ async function loadSidecar(
   const hit = subtitleCache.get(streamId);
   if (hit && Date.now() - hit.at < SUBTITLE_CACHE_TTL_MS) return { cues: hit.cues };
 
+  const sidecarStarted = Date.now();
   const got = await sidecarBytes(streamId, title);
   if ("status" in got) return got;
   const { raw, onMount } = got;
@@ -3181,6 +3182,8 @@ async function loadSidecar(
   logEvent("Subtitles", "sidecar ready to draw", {
     streamId, format: parsed.format, cues: parsed.cues.length, from: onMount ? onMount.file : "plex",
   });
+  adminHooks.processing({ at: Date.now(), kind: "sidecar", ratingKey: title?.ratingKey ?? null, ms: Date.now() - sidecarStarted, ok: true,
+    detail: { streamId: Number(streamId), format: parsed.format, cues: parsed.cues.length, by: onMount ? "file" : "plex" } });
   return { cues: parsed.cues };
 }
 
@@ -3335,6 +3338,7 @@ async function prefetchSubtitles(
   if (starting?.picture) {
     const fingerprint = subtitleFingerprint(version);
     if (!fingerprint || !ffmpegPgsOn() || (stillWanted && !stillWanted())) return;
+    pgsTitle(pgsKey(fingerprint, starting.id), ratingKey);
     pgsAhead(pgsKey(fingerprint, starting.id), () => pgsSource(ratingKey, mediaIndex, starting.id), from ?? `title:${ratingKey}`);
     return;
   }
@@ -3791,7 +3795,9 @@ async function pgsTrack(req: Request): Promise<{ key: string; ratingKey: string;
   const mediaIndex = Number.isInteger(requested) && requested >= 0 ? requested : await defaultMediaIndex(ratingKey);
   const track = await subtitleTrackOf(ratingKey, mediaIndex, Number(streamId));
   if (!track?.picture || !track.fingerprint) return null;
-  return { key: pgsKey(track.fingerprint, Number(streamId)), ratingKey, mediaIndex, streamId: Number(streamId) };
+  const key = pgsKey(track.fingerprint, Number(streamId));
+  pgsTitle(key, ratingKey);
+  return { key, ratingKey, mediaIndex, streamId: Number(streamId) };
 }
 
 /** What a PGS subtitle's cut is called: the file it is in, and its stream. */
@@ -5346,8 +5352,14 @@ async function startWithFfmpeg(o: {
   replaces?: string[];
 }): Promise<{ manifest: string } | { fallback: string }> {
   const session = o.sessionId.substring(0, 8);
+  // From the request to ffmpeg running: the Theater Dashboard's "stream setup".
+  const setupStarted = Date.now();
+  const setUp = (encode: boolean) => adminHooks.processing({ at: Date.now(), kind: "stream setup", hlsSessionId: o.sessionId,
+    ratingKey: o.ratingKey, ms: Date.now() - setupStarted, ok: true, detail: { encode, fromS: o.offsetS } });
   const toPlex = (fallback: string, log: string, extra: Record<string, unknown> = {}) => {
     logEvent("FFmpeg", `${log}; left to Plex`, { session, ratingKey: o.ratingKey, ...extra });
+    adminHooks.processing({ at: Date.now(), kind: "stream setup", hlsSessionId: o.sessionId, ratingKey: o.ratingKey,
+      ms: Date.now() - setupStarted, ok: false, detail: { why: log, fromS: o.offsetS } });
     return { fallback };
   };
   let source: SourceVersion | null = null;
@@ -5386,7 +5398,13 @@ async function startWithFfmpeg(o: {
   }
   // ffprobe's streams, once per file, asked while the stream is planned.
   const fileKey = `${fromMount ? local : source.partKey}:${source.fileSize ?? "?"}`;
+  const probeFresh = !probedAlready(fileKey);
+  const probeStarted = Date.now();
   const probed = probeOnce(fileKey, input);
+  if (probeFresh) {
+    void probed.then((found) => adminHooks.processing({ at: Date.now(), kind: "probe", hlsSessionId: o.sessionId, ratingKey: o.ratingKey,
+      ms: Date.now() - probeStarted, ok: !!found, detail: { streams: found?.streams.length ?? 0, from: fromMount ? "file" : "plex" } }));
+  }
   const tracksDiffer = async (used: Array<SourceStream | null | undefined>): Promise<string | null> => {
     const found = await probed;
     if (!found) {
@@ -5475,6 +5493,7 @@ async function startWithFfmpeg(o: {
     });
     if (!started.ok) return toPlex(`ffmpeg didn't start: ${started.why}`, "run didn't start", { why: started.why });
     key = started.key;
+    setUp(false);
     video = { ...copyPlan, kbps: o.fileKbps };
     tenBit = copyPlan.tenBit;
     perScreen = copyPlan.sdrPeakNits !== null;
@@ -5577,6 +5596,7 @@ async function startWithFfmpeg(o: {
     }
     if (!started.ok) return toPlex(`ffmpeg didn't start: ${started.why}`, "run didn't start", { why: started.why });
     key = started.key;
+    setUp(true);
     video = { ...plan, kbps: plan.kbps };
     allowedKbps = plan.askedKbps;
     hdrKept = plan.hdrTrc !== null && plan.sdrPeakNits === null;

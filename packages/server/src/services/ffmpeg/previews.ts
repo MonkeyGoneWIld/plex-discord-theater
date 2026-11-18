@@ -19,6 +19,7 @@ import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { logEvent } from "../logger.js";
+import { adminHooks } from "../admin-hooks.js";
 import { LruMap } from "../lru.js";
 import { ffmpegPath, previewsMaxBytes } from "./config.js";
 import { probe } from "./probe.js";
@@ -241,6 +242,8 @@ async function make(o: PreviewSource): Promise<string | null> {
   const [made, probed] = await Promise.all([pass(o.film, vf), probe(["-protocol_whitelist", "file", "-i", o.film])]);
   if ("failed" in made) {
     logEvent("Preview", "ffmpeg couldn't make previews", { partId: o.partId, why: made.failed, ms: Date.now() - startedAt });
+    adminHooks.processing({ at: Date.now(), kind: "previews", ratingKey: previewPartOf(o.partId)?.ratingKey ?? null, ms: Date.now() - startedAt,
+      ok: false, detail: { partId: o.partId, why: made.failed } });
     return null;
   }
   // A slot for every interval the file runs into, and none past its end.
@@ -266,6 +269,8 @@ async function make(o: PreviewSource): Promise<string | null> {
     hdr: o.hdr ? vf === SDR ? "as it is" : vf.includes("tonemapx") ? "tonemapx" : "zscale" : "no",
     bytes: fs.statSync(file).size, ms: Date.now() - startedAt,
   });
+  adminHooks.processing({ at: Date.now(), kind: "previews", ratingKey: previewPartOf(o.partId)?.ratingKey ?? null, ms: Date.now() - startedAt,
+    ok: true, detail: { partId: o.partId, frames: made.frames.length, everyS: PREVIEW_INTERVAL_S, hdr: o.hdr, bytes: fs.statSync(file).size } });
   trim();
   return file;
 }

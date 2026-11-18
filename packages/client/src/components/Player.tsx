@@ -8828,6 +8828,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     // concerned — see SyncState.hostWaiting.
     const sync = syncStateRef.current;
     const resuming = video.paused && !(sync?.playing && (sync.hostWaiting || roomWaitRef.current));
+    // The button shows the press until the player has done it (lib/pressIntent).
+    controlsRef.current?.noteIntent(resuming);
     if (resuming) {
       // Started when the room is — see sendRoomResume.
       sendRoomResume(hostPositionForRoom());

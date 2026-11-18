@@ -118,6 +118,34 @@ export interface StreamIssueEvent {
   detail: Record<string, unknown>;
 }
 
+/**
+ * A step the server took to prepare a title or make its stream, and how long
+ * it took: shown with the session it served (History) and in Statistics.
+ *  - probe: ffprobe reading the file's streams (once per file).
+ *  - stream setup: from the player's request to ffmpeg being started.
+ *  - first segment: from ffmpeg starting to its first segment.
+ *  - whole file: ffmpeg reaching the end of the file (remux or transcode complete).
+ *  - stream failed: ffmpeg stopping with an error.
+ *  - subtitle / subtitle window: an embedded text subtitle read out of the file,
+ *    whole or around a position.
+ *  - picture subtitle: a PGS, VobSub or DVB subtitle extracted for players to draw.
+ *  - sidecar: an external subtitle file read and parsed.
+ *  - previews: seek-preview thumbnails generated.
+ */
+export type ProcessingKind = "probe" | "stream setup" | "first segment" | "whole file" | "stream failed" | "subtitle"
+  | "subtitle window" | "picture subtitle" | "sidecar" | "previews";
+
+export interface ProcessingEvent {
+  at: number;
+  kind: ProcessingKind;
+  /** The stream it was for, when it was for one. */
+  hlsSessionId?: string | null;
+  ratingKey?: string | null;
+  ms: number;
+  ok: boolean;
+  detail?: Record<string, unknown>;
+}
+
 export interface AdminHooks {
   transport(e: TransportEvent): void;
   hostRequest(e: HostRequestEvent): void;
@@ -126,6 +154,7 @@ export interface AdminHooks {
   request(e: RequestEvent): void;
   place(e: PlaceEvent): void;
   sent(e: SentEvent): void;
+  processing(e: ProcessingEvent): void;
 }
 
 let current: Partial<AdminHooks> | null = null;
@@ -157,4 +186,5 @@ export const adminHooks = {
   request: (e: RequestEvent) => call("request", e),
   place: (e: PlaceEvent) => call("place", e),
   sent: (e: SentEvent) => call("sent", e),
+  processing: (e: ProcessingEvent) => call("processing", e),
 };

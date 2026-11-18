@@ -13,9 +13,9 @@ import { GraphsTab } from "./lazy";
 import { timeOfDay } from "./format";
 import { Icon, Logo } from "./icons";
 
-type Tab = "now" | "history" | "graphs" | "people" | "places" | "requests" | "caches" | "logs" | "settings";
+type Tab = "activity" | "history" | "graphs" | "people" | "places" | "requests" | "caches" | "logs" | "settings";
 const TABS: Array<{ id: Tab; label: string; group: "Monitor" | "Library" | "System" }> = [
-  { id: "now", label: "Now Playing", group: "Monitor" },
+  { id: "activity", label: "Activity", group: "Monitor" },
   { id: "history", label: "History", group: "Monitor" },
   { id: "graphs", label: "Statistics", group: "Monitor" },
   { id: "people", label: "Users", group: "Library" },
@@ -32,7 +32,8 @@ interface Route { tab: Tab; id: string | null }
 
 function routeFromHash(): Route {
   const [h, id] = location.hash.replace("#", "").split("/");
-  const tab = TABS.find((t) => t.id === h)?.id ?? "now";
+  // "#now" is the page's address from before it was called Activity: bookmarks to it still open it.
+  const tab = TABS.find((t) => t.id === (h === "now" ? "activity" : h))?.id ?? "activity";
   return { tab, id: id ? decodeURIComponent(id) : null };
 }
 
@@ -83,8 +84,8 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    // Opened with nothing after the address: Now Playing, and the address says so.
-    if (!location.hash.replace("#", "")) history.replaceState(null, "", "#now");
+    // Opened with nothing after the address: Activity, and the address says so.
+    if (!location.hash.replace("#", "") || location.hash === "#now") history.replaceState(null, "", "#activity");
     api.session().then((s) => setSignedIn(s.signedIn)).catch(() => setSignedIn(false));
     const onHash = () => {
       setRoute(routeFromHash());
@@ -127,7 +128,7 @@ export function App() {
   return (
     <div className="shell">
       <aside className="sidebar">
-        <a className="brand" href="#now"><Logo /><span>Theater<br /><small>Dashboard</small></span></a>
+        <a className="brand" href="#activity"><Logo /><span>Theater<br /><small>Dashboard</small></span></a>
         <nav aria-label="Pages">
           {GROUPS.map((g) => (
             <div key={g} className="nav-group">
@@ -137,7 +138,7 @@ export function App() {
                   className={tab === t.id ? "nav-item active" : "nav-item"}>
                   <Icon name={t.id} />
                   <span>{t.label}</span>
-                  {t.id === "now" && sessions > 0 && <span className="nav-count">{sessions}</span>}
+                  {t.id === "activity" && sessions > 0 && <span className="nav-count">{sessions}</span>}
                 </a>
               ))}
             </div>
@@ -162,7 +163,7 @@ export function App() {
           </div>
         )}
         <main className="content">
-          {tab === "now" && <NowPlaying data={data} />}
+          {tab === "activity" && <NowPlaying data={data} />}
           {tab === "history" && <History key={id ?? ""} id={id} onError={onError} />}
           {tab === "graphs" && <GraphsTab onError={onError} />}
           {tab === "people" && <People key={id ?? ""} id={id} onError={onError} />}

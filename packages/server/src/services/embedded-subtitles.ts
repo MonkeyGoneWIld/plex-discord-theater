@@ -69,6 +69,7 @@ import { randomUUID } from "node:crypto";
 import { plexFetch, plexUrl } from "./plex.js";
 import { parseSubtitles, parseTimestamp, SUBTITLE_PARSER_VERSION, type Cue } from "./subtitles.js";
 import { logEvent } from "./logger.js";
+import { adminHooks } from "./admin-hooks.js";
 import { LruMap } from "./lru.js";
 import { ffmpegPath } from "./ffmpeg/config.js";
 
@@ -604,6 +605,8 @@ async function fileWindow(
         ratingKey: r.ratingKey, streamId: r.streamId, from: Math.round(w.from), to: Math.round(until),
         cues: w.cues.length, ms: Date.now() - startedAt, behind: Math.round(r.frontier),
       });
+      adminHooks.processing({ at: Date.now(), kind: "subtitle window", ratingKey: String(r.ratingKey), ms: Date.now() - startedAt, ok: true,
+        detail: { streamId: r.streamId, fromS: Math.round(w.from), toS: Math.round(until), cues: w.cues.length } });
     }
   }
 }
@@ -1277,6 +1280,8 @@ function keep(
       ...details, why: raw.length === 0 ? "nothing came" : "not a subtitle that came",
       bytes: raw.length, start: JSON.stringify(decodeSubtitle(raw.subarray(0, 120))), ms: Date.now() - startedAt,
     });
+    adminHooks.processing({ at: Date.now(), kind: "subtitle", ratingKey: String(r.ratingKey), ms: Date.now() - startedAt, ok: false,
+      detail: { streamId: r.streamId, by: how.by, why: raw.length === 0 ? "No data was read" : "The data read was not a subtitle" } });
     return;
   }
   const lastEndS = lastEnd(parsed.cues);
@@ -1307,6 +1312,8 @@ function keep(
     whole,
     ...(empty ? { note: "closed captions with nothing in them" } : {}), ...stats, ms: Date.now() - startedAt,
   });
+  adminHooks.processing({ at: Date.now(), kind: "subtitle", ratingKey: String(details.ratingKey), ms: Date.now() - startedAt, ok: true,
+    detail: { streamId: details.streamId, by: how.by, format: parsed.format, cues: parsed.cues.length, bytes: raw.length, whole, again: !!again } });
 }
 
 /** The read from the start: what is drawn until it's done, and what is kept.
@@ -1321,6 +1328,8 @@ async function run(r: Reading, opts: ReadOptions, again?: { lastEndS: number }):
     logEvent("Subtitles", "couldn't read an embedded subtitle out of the file", {
       ...details, why, ...extra, ms: Date.now() - startedAt,
     });
+    adminHooks.processing({ at: Date.now(), kind: "subtitle", ratingKey: String(r.ratingKey), ms: Date.now() - startedAt, ok: false,
+      detail: { streamId: r.streamId, why } });
   };
 
   // The others of this file waiting their turn, read now, in the same pass:

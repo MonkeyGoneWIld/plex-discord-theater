@@ -172,6 +172,10 @@ const feed = () => {
         t: now - (sampled - k) * 10_000, level: "LOG", tag: "Health", msg: "sample",
         data: { session: "fixture", httpMB: mb, p2pMB: i % 2 ? mb / 3 : 0, edgeHitMB: (mb * 0.4).toFixed(1), edgeMB: (mb * 0.9).toFixed(1),
           peerKey: keyOf(userId), ...(upMB > 0 ? { upMB, upTo } : {}), driftS: driftOf(i, k), downloadedAheadS: aheadOf(i, k),
+          bufAheadS: Math.min(30, aheadOf(i, k)), peers: i < 4 ? 3 : 1, heapUsedMB: 180 + i * 20 + (k % 5) * 4,
+          // robin's player drops frames now and then; the paused film shows none.
+          ...(i < 4 ? { framesShown: 240, framesDropped: i === 3 && k % 4 === 0 ? 18 : 0 } : { framesShown: 0, framesDropped: 0 }),
+          ...(i === 3 && Math.abs(Math.sin(k / 3) * 2.8) > 2 ? { rateX: 1.05 } : {}),
           // Where each player is: the episode playing from 312 s, the film paused at 4210 s.
           ...(i < 4 ? { posS: 312 + k * 10, paused: false, playedS: 10 } : { posS: 4210, paused: true, playedS: 0 }) },
       };
@@ -189,6 +193,26 @@ const feed = () => {
 };
 setTimeout(feed, 3_000);
 setInterval(feed, 10_000);
+
+// How long the server took to prepare each stream: probing the files, setting the streams up,
+// their first segments, robin's subtitles and the episode's seek previews; the film's copy finished.
+setTimeout(() => {
+  const t = Date.now();
+  const step = (kind: string, hlsSessionId: string | null, ratingKey: string, ms: number, ago: number, detail: Record<string, unknown> = {}, ok = true) =>
+    recorder.processing({ at: t - ago, kind: kind as never, hlsSessionId, ratingKey, ms, ok, detail });
+  step("probe", copy, "58861", 412, 118_000, { streams: 4, from: "file" });
+  step("stream setup", copy, "58861", 960, 117_500, { encode: false, fromS: 0 });
+  step("first segment", copy, "58861", 1_340, 116_000, { encode: false, fromS: 0 });
+  step("stream setup", encode, "58861", 1_480, 100_000, { encode: true, fromS: 0 });
+  step("first segment", encode, "58861", 2_870, 97_000, { encode: true, fromS: 0 });
+  step("subtitle", null, "58861", 2_140, 110_000, { streamId: 3, by: "ffmpeg", format: "srt", cues: 412, whole: true });
+  step("previews", null, "58861", 18_400, 90_000, { frames: 708, everyS: 2 });
+  step("probe", filmCopy, "173951", 380, 115_000, { streams: 3, from: "file" });
+  step("stream setup", filmCopy, "173951", 820, 114_800, { encode: false, fromS: 4210 });
+  step("first segment", filmCopy, "173951", 1_120, 113_500, { encode: false, fromS: 4210 });
+  step("picture subtitle", null, "173951", 41_300, 70_000, { pieces: 3, bytes: 1_840_000 });
+  step("whole file", filmCopy, "173951", 64_000, 50_000, { encode: false, fromS: 4210, endS: 6720, madeS: 2510, speedX: 39.2 });
+}, 2_000);
 
 // For the Requests and Caches pages: a few requests, and files in the caches.
 recorder.request({ at: Date.now() - 30 * 60_000, userId: "402115789012345678", mediaType: "movie", tmdbId: 129,

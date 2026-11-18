@@ -102,6 +102,15 @@ export async function backfill(dbPath: string, now: number, days = 45): Promise<
       rec.tick(g);
       g += 15_000;
       Object.assign(room, { ratingKey, title, playing: true });
+      // How long the server took to prepare it: the file's probe, each stream's setup and first segment, a subtitle.
+      for (const s of streams) {
+        const enc = s.decision === "transcode";
+        rec.processing({ at: g - 3_000, kind: "probe", hlsSessionId: s.hlsSessionId, ratingKey, ms: 250 + Math.floor(rnd() * 600), ok: true, detail: { streams: 3, from: "file" } });
+        rec.processing({ at: g - 2_000, kind: "stream setup", hlsSessionId: s.hlsSessionId, ratingKey, ms: 600 + Math.floor(rnd() * (enc ? 1500 : 700)), ok: true, detail: { encode: enc, fromS: 0 } });
+        rec.processing({ at: g, kind: "first segment", hlsSessionId: s.hlsSessionId, ratingKey, ms: (enc ? 1800 : 700) + Math.floor(rnd() * (enc ? 2500 : 900)), ok: true, detail: { encode: enc, fromS: 0 } });
+      }
+      if (n % 3 === 0) rec.processing({ at: g + 4_000, kind: "subtitle", hlsSessionId: null, ratingKey, ms: 900 + Math.floor(rnd() * 4000), ok: n % 15 !== 0,
+        detail: n % 15 !== 0 ? { streamId: 3, by: "ffmpeg", format: "srt", cues: 380, whole: true } : { streamId: 3, why: "The data read was not a subtitle" } });
       if (ratingKey === "80002") rec.streamIssue({ at: g, hlsSessionId: `past-${n}-0`, ratingKey, kind: "short sound",
         detail: { soundEndsS: minutes * 60 - 22.5, pictureEndsS: minutes * 60 } });
       rec.transport({ at: g, roomId, type: "play", userId: hostId, username: people[0][1], role: "host", fromS: 0, toS: 0, ratingKey, title } as never);
@@ -189,6 +198,11 @@ export async function backfill(dbPath: string, now: number, days = 45): Promise<
             session: "past", httpMB: had[i] * share, p2pMB: got[i] * share, edgeHitMB: (had[i] * share * hits[i]).toFixed(1),
             edgeMB: (had[i] * share * 0.9).toFixed(1), peerKey: keyOf(userId),
             posS: Math.max(0, (room.positionS as number) - (i ? 0.4 * i : 0)), paused: !room.playing, playedS: room.playing ? 10 : 0,
+            // How far each viewer's player is from the room, and what it has ahead: the last viewer's runs short now and then.
+            driftS: i === 0 ? "n/a(host)" : Math.round(Math.sin((g - start) / 40_000 + i) * (i === people.length - 1 ? 2.6 : 0.5) * 100) / 100,
+            downloadedAheadS: Math.round((i === people.length - 1 ? 6 + Math.abs(Math.sin((g - start) / 90_000)) * 30 : 30 + Math.sin((g - start) / 60_000 + i) * 8) * 10) / 10,
+            bufAheadS: 20, peers: people.length - 1, heapUsedMB: 160 + i * 25,
+            framesShown: room.playing ? 240 : 0, framesDropped: room.playing && i === people.length - 1 && ((g - start) / 10_000) % 9 === 0 ? 12 : 0,
           } }] as never }));
         }
       }
@@ -239,4 +253,33 @@ export async function backfill(dbPath: string, now: number, days = 45): Promise<
   }
   await new Promise((r) => setTimeout(r, 50));
   rec.close();
+
+  // The server's load a minute at a time over the last week, as the System page charts it: busier while something played.
+  const { default: Database } = await import("better-sqlite3");
+  const db = new Database(dbPath);
+  const busy = db.prepare(`SELECT p.started_at AS s, COALESCE(p.ended_at, p.updated_at) AS e,
+      (SELECT COUNT(*) FROM play_streams x WHERE x.play_id = p.id) AS n,
+      (SELECT COUNT(*) FROM play_streams x WHERE x.play_id = p.id AND x.decision = 'transcode') AS t,
+      (SELECT COUNT(*) FROM play_viewers v WHERE v.play_id = p.id) AS v
+    FROM plays p WHERE COALESCE(p.ended_at, p.updated_at) >= ?`).all(now - 7 * DAY) as Array<{ s: number; e: number; n: number; t: number; v: number }>;
+  const put = db.prepare(`INSERT INTO system_load (minute, cpu_pct, bot_cpu_pct, mem_pct, rss_mb, load1, streams, encodes, viewers)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (minute) DO UPDATE SET cpu_pct = excluded.cpu_pct, bot_cpu_pct = excluded.bot_cpu_pct,
+        mem_pct = excluded.mem_pct, rss_mb = excluded.rss_mb, load1 = excluded.load1,
+        streams = MAX(streams, excluded.streams), encodes = MAX(encodes, excluded.encodes), viewers = MAX(viewers, excluded.viewers)`);
+  const r1 = (v: number) => Math.round(v * 10) / 10;
+  db.transaction(() => {
+    for (let m = Math.floor((now - 7 * DAY) / 60_000); m < Math.floor(now / 60_000) - 1; m++) {
+      const t = m * 60_000;
+      const on = busy.filter((p) => p.s <= t && t <= p.e);
+      const streams = on.reduce((a, p) => a + p.n, 0);
+      const encodes = on.reduce((a, p) => a + p.t, 0);
+      const viewers = on.reduce((a, p) => a + p.v, 0);
+      const wave = Math.sin((t / DAY) * 2 * Math.PI) * 2.5;
+      const cpu = Math.min(100, 6 + wave + rnd() * 4 + streams * 4 + encodes * 21);
+      const bot = Math.min(cpu, 0.6 + rnd() * 0.6 + streams * 1.4 + encodes * 0.4);
+      const mem = 41 + wave / 2 + rnd() * 1.5 + streams * 1.8 + encodes * 3.5;
+      put.run(m, r1(cpu), r1(bot), r1(mem), r1(170 + rnd() * 12 + streams * 38), Math.round((cpu / 100) * 8 * 100) / 100, streams, encodes, viewers);
+    }
+  })();
+  db.close();
 }

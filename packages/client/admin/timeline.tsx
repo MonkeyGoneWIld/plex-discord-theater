@@ -156,6 +156,8 @@ interface Hover {
   t: number; x: number; y: number; h: number; touch: boolean;
   /** Where the pointer is on screen, and the bottom of the bars stuck to the top of it: the readout stays between them and the screen's foot. */
   vy: number; clear: number;
+  /** Across the screen: the pointer, and the right edge of the sidebar, which the readout keeps clear of. */
+  vx: number; edge: number;
 }
 
 /** The bottom of whatever is stuck to the top of the screen: the top bar on a tablet, the section bar once it sticks. */
@@ -163,6 +165,13 @@ function stuckBottom(): number {
   const bars = [...document.querySelectorAll(".sidebar, .section-nav")].map((el) => el.getBoundingClientRect())
     .filter((r) => r.top <= 1 && r.height < window.innerHeight / 2);
   return Math.max(0, ...bars.map((r) => r.bottom));
+}
+
+/** The right edge of the sidebar down the side of the screen (none on a tablet or phone, where it is a bar at the top). */
+function sideEdge(): number {
+  const bars = [...document.querySelectorAll(".sidebar")].map((el) => el.getBoundingClientRect())
+    .filter((r) => r.left <= 1 && r.height >= window.innerHeight / 2);
+  return Math.max(0, ...bars.map((r) => r.right));
 }
 
 interface ViewerLane {
@@ -200,6 +209,7 @@ export function SessionTimeline({ data, durationS, ctx, live = false }: {
   // so it does not jump up and down as events come and go.
   const tipRef = useRef<HTMLDivElement>(null);
   const [tipH, setTipH] = useState(0);
+  const tipSide = useRef<{ h: "right" | "left"; v: "below" | "above" } | null>(null);
   useLayoutEffect(() => {
     if (!hover) { if (tipH) setTipH(0); return; }
     const h = tipRef.current?.offsetHeight ?? 0;
@@ -277,7 +287,7 @@ export function SessionTimeline({ data, durationS, ctx, live = false }: {
     const f = (e.clientX - left) / trackW;
     if (f < 0 || f > 1) { if (e.pointerType !== "touch") setHover(null); return; }
     setHover({ t: w0 + (w1 - w0) * f, x: e.clientX - left, y: e.clientY - box.top, h: box.height, touch: e.pointerType === "touch",
-      vy: e.clientY, clear: stuckBottom() });
+      vy: e.clientY, clear: stuckBottom(), vx: e.clientX, edge: sideEdge() });
   };
 
   const grid = (h: number) => ticks.map((t) => <line key={t} className="tl-grid" x1={x(t)} x2={x(t)} y1={0} y2={h} />);
@@ -606,20 +616,30 @@ export function SessionTimeline({ data, durationS, ctx, live = false }: {
   };
 
   const TIP_W = Math.min(500, Math.max(320, width - 16));
-  const tipLeft = hover ? (() => {
-    const right = labelW + gapW + hover.x + 14;
-    return right + TIP_W <= width ? right : Math.max(0, labelW + gapW + hover.x - 14 - TIP_W);
-  })() : 0;
-  // Below the pointer where it fits on screen, else above; never under the bars stuck at the top nor past the foot.
-  const tipTop = hover ? (() => {
-    const room = window.innerHeight;
+  // Beside the pointer and below it where it fits in the browser window, not just the chart; it keeps the side it is
+  // on while that still fits (or neither side does), so it does not flip back and forth; never under the sidebar, the
+  // bars stuck at the top or past the window's edges.
+  if (!hover) tipSide.current = null;
+  const { tipLeft, tipTop } = hover ? (() => {
+    const winW = document.documentElement.clientWidth;
+    const winH = window.innerHeight;
+    const lanesLeft = hover.vx - (labelW + gapW + hover.x);
     const lanesTop = hover.vy - hover.y;
-    const fitsBelow = hover.vy + 14 + tipH <= room - 8;
+    const minX = hover.edge + 8;
+    const fitsRight = hover.vx + 14 + TIP_W <= winW - 8;
+    const fitsLeft = hover.vx - 14 - TIP_W >= minX;
+    const fitsBelow = hover.vy + 14 + tipH <= winH - 8;
     const fitsAbove = hover.vy - 14 - tipH >= hover.clear + 8;
-    const top = fitsBelow || (!fitsAbove && hover.vy < room / 2) ? hover.y + 14 : hover.y - 14 - tipH;
-    const min = hover.clear + 8 - lanesTop;
-    return Math.max(min, Math.min(top, room - 8 - tipH - lanesTop));
-  })() : 0;
+    const was = tipSide.current;
+    const h = was && (was.h === "right" ? fitsRight : fitsLeft) ? was.h : was && !fitsRight && !fitsLeft ? was.h
+      : fitsRight || (!fitsLeft && hover.vx < winW / 2) ? "right" : "left";
+    const v = was && (was.v === "below" ? fitsBelow : fitsAbove) ? was.v : was && !fitsBelow && !fitsAbove ? was.v
+      : fitsBelow || (!fitsAbove && hover.vy < winH / 2) ? "below" : "above";
+    tipSide.current = { h, v };
+    const sx = Math.max(minX, Math.min(h === "right" ? hover.vx + 14 : hover.vx - 14 - TIP_W, winW - 8 - TIP_W));
+    const sy = Math.max(hover.clear + 8, Math.min(v === "below" ? hover.vy + 14 : hover.vy - 14 - tipH, winH - 8 - tipH));
+    return { tipLeft: sx - lanesLeft, tipTop: sy - lanesTop };
+  })() : { tipLeft: 0, tipTop: 0 };
 
   // ── The key under the chart: only what it shows ──
   const decisions = new Set(streams.map((s) => decisionOf(s).tone));

@@ -308,6 +308,7 @@ a:hover { text-decoration: underline; }
 .chart-card { min-width: 0; }
 .chart-card.wide { grid-column: 1 / -1; }
 .chart-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+.chart-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: baseline; gap: 4px 12px; text-align: right; }
 .chart-sub { margin: 2px 0 0; }
 .chart { width: 100%; margin-top: 12px; }
 .chart-table { margin-top: 8px; max-height: 360px; overflow-y: auto; }

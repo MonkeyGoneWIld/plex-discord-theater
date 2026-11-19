@@ -11,6 +11,7 @@ import { Requests } from "./Requests";
 import { Caches } from "./Caches";
 import { GraphsTab } from "./lazy";
 import { timeOfDay } from "./format";
+import { liveFeed } from "./live";
 import { Icon, Logo } from "./icons";
 
 type Tab = "activity" | "history" | "graphs" | "people" | "places" | "requests" | "caches" | "logs" | "settings";
@@ -95,25 +96,17 @@ export function App() {
     return () => removeEventListener("hashchange", onHash);
   }, []);
 
-  // The live feed, while signed in. EventSource reconnects by itself; a
-  // session that ended says so, and the page goes back to its sign-in.
+  // The live feed, while signed in: opened again after a restart of the bot or a quiet spell
+  // (live.ts); a session that ended says so, and the page goes back to its sign-in.
   useEffect(() => {
     if (!signedIn) return;
-    const es = new EventSource("/api/live");
-    es.onopen = () => setLive("live");
-    es.onmessage = (ev) => {
-      setLive("live");
-      setData(JSON.parse(ev.data) as Overview);
-    };
-    es.addEventListener("signed-out", () => {
-      es.close();
-      setSignedIn(false);
+    return liveFeed<Overview>({
+      url: "/api/live",
+      onData: setData,
+      onState: setLive,
+      onSignedOut: () => setSignedIn(false),
+      signedIn: () => api.session().then((s) => s.signedIn),
     });
-    es.onerror = () => {
-      setLive("lost");
-      api.session().then((s) => { if (!s.signedIn) { es.close(); setSignedIn(false); } }).catch(() => {});
-    };
-    return () => es.close();
   }, [signedIn]);
 
   // The browser tab says what is playing, so it can be told at a glance.

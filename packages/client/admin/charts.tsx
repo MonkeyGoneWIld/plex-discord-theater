@@ -24,13 +24,15 @@ type Row = Record<string, unknown>;
 const AXIS_TICK = { fill: "var(--muted)", fontSize: 12 };
 
 /** A chart's card: what it shows, its legend, and a table of the same numbers. */
-export function ChartCard({ title, sub, series, table, children, wide }: {
+export function ChartCard({ title, sub, series, table, children, wide, actions }: {
   title: string;
   sub?: ReactNode;
   series?: Series[];
   table: ReactNode;
   children: ReactNode;
   wide?: boolean;
+  /** Controls of the chart's own beside Show table (a zoom's Reset zoom, say). */
+  actions?: ReactNode;
 }) {
   const [asTable, setAsTable] = useState(false);
   return (
@@ -40,9 +42,12 @@ export function ChartCard({ title, sub, series, table, children, wide }: {
           <h3>{title}</h3>
           {sub && <p className="muted small chart-sub">{sub}</p>}
         </div>
-        <button className="link small" onClick={() => setAsTable(!asTable)} aria-pressed={asTable}>
-          {asTable ? "Show chart" : "Show table"}
-        </button>
+        <div className="chart-actions">
+          {actions}
+          <button className="link small" onClick={() => setAsTable(!asTable)} aria-pressed={asTable}>
+            {asTable ? "Show chart" : "Show table"}
+          </button>
+        </div>
       </header>
       {!asTable && series && series.length > 1 && (
         <ul className="legend">

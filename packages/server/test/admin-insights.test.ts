@@ -93,6 +93,12 @@ check("  the host's distance is nothing: the room follows them", [live("111")?.d
 t += 11 * 60_000;
 say("222", health("SI2", { httpMB: 5, p2pMB: 1, edgeHitMB: "1.0", edgeMB: "2.0", driftS: 0, downloadedAheadS: 20 }));
 check("  only the last ten minutes are kept", live("222")?.health?.map((h) => h[2]), [20]);
+step(10_000);
+say("222", health("SI2", { httpMB: 5, p2pMB: 1, edgeHitMB: "1.0", edgeMB: "2.0", driftS: 0, downloadedAheadS: 140 }));
+step(10_000);
+// 19 November: the buffer's trend on Activity ran on from the episode before.
+say("222", health("SI4", { httpMB: 0, p2pMB: 0, edgeHitMB: "0.0", edgeMB: "0.0", driftS: 0.2, downloadedAheadS: 6 }));
+check("  a new stream's are its own, not run on from the one before", live("222")?.health?.map((h) => h[2]), [6]);
 
 console.log("\n— requests for host that came to nothing —");
 rec.hostRequest({ at: t, roomId: "RI", outcome: "asked", userId: "222", username: "robin", hostId: "111", hostName: "alex", away: true, waitS: 30 });

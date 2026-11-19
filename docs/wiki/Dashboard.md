@@ -68,7 +68,9 @@ command. See [Configuration Reference](Configuration-Reference#access-and-securi
 ## Activity
 
 Sessions in progress, updated every 2 seconds. The browser tab shows how many
-are active.
+are active. When the bot restarts, or nothing arrives for 15 seconds, the
+sidebar shows **Reconnecting…** and the page reconnects by itself within a few
+seconds of the bot being back; no reload is needed.
 
 **At the top**
 
@@ -96,8 +98,8 @@ are active.
    Discord app on a phone, Vesktop, or a browser, with the operating system),
    status, stream, sync offset from the session position to a hundredth of a
    second (as the player's Stats show it), buffer in seconds
-   with its trend over the last 10 minutes on the timeline's 0 to 150 second
-   scale (amber under 10 seconds), watch time, data received with
+   with its trend over the last 10 minutes of the current stream on the
+   timeline's 0 to 150 second scale (amber under 10 seconds), watch time, data received with
    its split, data sent to peers, and buffering. Status is the player's last
    report: watching, loading (at the start or after a seek), buffering and
    for how long, out of sync (more than 2 seconds from the session
@@ -212,8 +214,9 @@ that moment, in sections: **Session** (playback and the position);
 **Streams**; **Data delivered** by source and the required bitrate;
 **Viewers** (each viewer's role, status, stream, sync offset, buffer and
 dropped frames); and **Events** near that moment, each with the mark it has
-on the chart and the one under the pointer highlighted. The readout keeps
-its place while the pointer moves along a row. On a phone the readout sits under the chart, each viewer on two
+on the chart and the one under the pointer highlighted. The readout sits
+beside the pointer within the browser window, keeps its place while the
+pointer moves along a row, and changes sides only at the window's edge. On a phone the readout sits under the chart, each viewer on two
 lines. Hover any bar, line or mark for its details. Where labels would
 overlap, as on a phone, some are left to their mark's hover.
 
@@ -343,10 +346,12 @@ whole file** clears that.
 - **Status.** Version, uptime, memory and platform.
 - **Server load.** Recorded each minute and shown over the last hour, 6 hours,
   24 hours, 7 days, 30 days or 90 days, or a custom period (**Custom…**: the
-  last so many hours or days, a date range or a time range). Drag across any
-  chart with the mouse to zoom into that stretch, down to 10 minutes in
-  one-minute steps; **Zoom out** goes back one zoom and **Reset zoom** to the
-  period chosen. The period shown and its step are above the figures. The
+  last so many hours or days, a date range or a time range). The period shown
+  and its step are above the figures. Drag across a chart with the mouse to
+  zoom that chart alone into that stretch, down to 10 minutes in one-minute
+  steps; its header then shows the stretch and step, **Zoom out** (back one
+  zoom) and **Reset zoom** (back to the period chosen). A new period resets
+  every chart. The
   charts: CPU usage of the machine and of the bot
   process, memory usage of the machine and of the bot process, streams and
   viewers, the server's upload, and the load average (Linux only, with a line

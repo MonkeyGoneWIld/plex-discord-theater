@@ -1165,6 +1165,8 @@ export class Recorder {
       while (this.peerKeys.size > MAX_PEER_KEYS) this.peerKeys.delete(this.peerKeys.keys().next().value as string);
     }
     const p = this.player(key, entry.t);
+    // The last minutes' sync and buffer are the stream's now playing: not those of the title or stream before it.
+    if (p.sampled && session !== p.session) p.health = [];
     const baseline = !p.sampled && entry.t - this.startedAt < BASELINE_WINDOW_MS;
     // A new player (a new stream, a rebuild) counts from zero again.
     const restarted = p.sampled && (session !== p.session || p2p < p.p2p || http < p.http);

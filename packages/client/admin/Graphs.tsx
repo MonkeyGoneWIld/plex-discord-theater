@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api, type GraphPeriod } from "./api";
 import type { GraphDay, Graphs as GraphData, PersonPlay, SystemLoad } from "./types";
 import { bytes, clock, dayDate, dayTime, duration, hourLabel, shortTime, zoneLabel } from "./format";
@@ -784,13 +784,10 @@ const pctText = (n: number) => `${n.toFixed(n >= 10 ? 0 : 1)}%`;
 export function SystemLoadPanel({ onError }: { onError: (e: unknown) => void }) {
   const [period, setPeriod] = useState<GraphPeriod>({ hours: 24 });
   const [custom, setCustom] = useState(false);
-  // Each zoom in, to go back out of it one at a time.
-  const [zooms, setZooms] = useState<GraphPeriod[]>([]);
   const key = JSON.stringify(period);
   const { data, busy } = useLoad(() => api.systemLoad(period), [key], onError);
   const preset = LOAD_PERIODS.some(([, p]) => samePeriod(p, period));
-  const pickPeriod = (p: GraphPeriod) => { setZooms([]); setPeriod(p); };
-  const zoom = (from: number, to: number) => { setZooms([...zooms, period]); setPeriod({ from, to }); };
+  const pickPeriod = (p: GraphPeriod) => setPeriod(p);
   return (
     <section className="card">
       <div className="panel-head">
@@ -810,28 +807,22 @@ export function SystemLoadPanel({ onError }: { onError: (e: unknown) => void }) 
           <span className="muted small">{dayTime(data.from)} – {data.to >= Date.now() - 60_000 ? "now"
             : new Date(data.to).toDateString() === new Date(data.from).toDateString() ? shortTime(data.to) : dayTime(data.to)}
             {` · ${Math.round(data.stepMs / 60_000)} min steps`}</span>
-          {zooms.length > 0 && (
-            <>
-              <button type="button" className="link" onClick={() => { setPeriod(zooms[zooms.length - 1]); setZooms(zooms.slice(0, -1)); }}>Zoom out</button>
-              {zooms.length > 1 && <button type="button" className="link" onClick={() => { setPeriod(zooms[0]); setZooms([]); }}>Reset zoom</button>}
-            </>
-          )}
         </div>
       )}
+      {/* A new period takes each chart out of its zoom. */}
       {!data ? <p className="empty">{busy ? "Loading…" : "The server load could not be loaded."}</p>
-        : <div className={busy ? "stale" : ""}><SystemLoadBody d={data} onZoom={zoom} /></div>}
+        : <div className={busy ? "stale" : ""}><SystemLoadBody key={key} d={data} onError={onError} /></div>}
     </section>
   );
 }
 
 type LoadPoint = SystemLoad["points"][number];
 
-function SystemLoadBody({ d, onZoom }: { d: SystemLoad; onZoom: (from: number, to: number) => void }) {
-  if (d.points.length === 0) {
-    return <p className="muted">No server load was recorded in this period. Recording starts when this version of the bot starts.</p>;
-  }
-  // A null row where minutes are missing, so the lines break across them.
-  const rows: Array<Record<string, number | null>> = [];
+type LoadRow = Record<string, number | null>;
+
+/** The chart rows of a period, with a null row where minutes are missing, so the lines break across them. */
+function loadRows(d: SystemLoad): LoadRow[] {
+  const rows: LoadRow[] = [];
   for (const p of d.points) {
     const prev = rows[rows.length - 1];
     if (prev && p.at - Number(prev.at) > d.stepMs * 2.5) {
@@ -839,6 +830,64 @@ function SystemLoadBody({ d, onZoom }: { d: SystemLoad; onZoom: (from: number, t
     }
     rows.push({ at: p.at, cpu: p.cpuPct, bot: p.botCpuPct, mem: p.memPct, rss: p.rssMb, load: p.load1, streams: p.streams, encodes: p.encodes,
       viewers: p.viewers, sent: p.sentBps / 1e6 });
+  }
+  return rows;
+}
+
+interface LoadChartSpec {
+  title: string;
+  sub: string;
+  series: Series[];
+  fmt: (n: number) => string;
+  axisFmt?: (n: number) => string;
+  max?: number;
+  curve?: "stepAfter";
+  threshold?: { value: number; label: string };
+}
+
+/**
+ * One chart of the server load. A drag across it zooms this chart alone into
+ * that time, at the finer steps the server keeps for it; Zoom out goes back a
+ * zoom at a time and Reset zoom to the panel's period.
+ */
+function LoadChart({ base, spec, onError }: { base: SystemLoad; spec: LoadChartSpec; onError: (e: unknown) => void }) {
+  const [zooms, setZooms] = useState<Array<{ from: number; to: number }>>([]);
+  const z = zooms.length > 0 ? zooms[zooms.length - 1] : null;
+  const [zoomed, setZoomed] = useState<{ z: { from: number; to: number }; d: SystemLoad } | null>(null);
+  useEffect(() => {
+    if (!z) return;
+    let gone = false;
+    api.systemLoad({ from: z.from, to: z.to }).then((d) => { if (!gone) setZoomed({ z, d }); }).catch((e) => { if (!gone) onError(e); });
+    return () => { gone = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [z?.from, z?.to]);
+  const ready = z && zoomed && zoomed.z.from === z.from && zoomed.z.to === z.to ? zoomed.d : null;
+  // Until the zoom's own steps come, the period's own steps in that time.
+  const d: SystemLoad = !z ? base : ready ?? { ...base, from: z.from, to: z.to, points: base.points.filter((p) => p.at >= z.from && p.at <= z.to) };
+  const rows = loadRows(d);
+  const tableRows = rows.filter((r) => r.cpu !== null || r.streams !== null).map((r) => ({ ...r, label: dayTime(Number(r.at)) }));
+  const range = `${dayTime(d.from)} – ${new Date(d.to).toDateString() === new Date(d.from).toDateString() ? shortTime(d.to) : dayTime(d.to)}`;
+  const actions = z ? (
+    <>
+      <span className="muted small">{range} · {Math.round(d.stepMs / 60_000)} min steps</span>
+      {zooms.length > 1 && <button type="button" className="link small" onClick={() => setZooms(zooms.slice(0, -1))}>Zoom out</button>}
+      <button type="button" className="link small" onClick={() => setZooms([])}>Reset zoom</button>
+    </>
+  ) : undefined;
+  return (
+    <ChartCard title={spec.title} sub={spec.sub} series={spec.series} actions={actions}
+      table={<SeriesTable rows={tableRows} label="Time" labelKey="label" series={spec.series} fmt={spec.fmt} />}>
+      <div className={z && !ready ? "stale" : ""}>
+        <Lines rows={rows} series={spec.series} from={d.from} to={d.to} onZoom={(from, to) => setZooms([...zooms, { from, to }])}
+          max={spec.max} fmt={spec.fmt} axisFmt={spec.axisFmt} curve={spec.curve} threshold={spec.threshold} />
+      </div>
+    </ChartCard>
+  );
+}
+
+function SystemLoadBody({ d, onError }: { d: SystemLoad; onError: (e: unknown) => void }) {
+  if (d.points.length === 0) {
+    return <p className="muted">No server load was recorded in this period. Recording starts when this version of the bot starts.</p>;
   }
   const vals = (k: keyof LoadPoint) => d.points.map((p) => p[k]).filter((v): v is number => typeof v === "number");
   const avg = (a: number[]) => (a.length ? a.reduce((s, v) => s + v, 0) / a.length : null);
@@ -863,8 +912,7 @@ function SystemLoadBody({ d, onZoom }: { d: SystemLoad; onZoom: (from: number, t
   const work: Series[] = [{ key: "viewers", label: "Viewers", color: COLORS[2] }, { key: "streams", label: "Streams", color: COLORS[0] },
     { key: "encodes", label: "Transcodes", color: COLORS[1] }];
   const at = (p: { at: number } | null) => (p ? ` on ${dayTime(p.at)}` : "");
-  const tableRows = rows.filter((r) => r.cpu !== null || r.streams !== null).map((r) => ({ ...r, label: dayTime(Number(r.at)) }));
-  const table = (s: Series[], fmt: (n: number) => string) => <SeriesTable rows={tableRows} label="Time" labelKey="label" series={s} fmt={fmt} />;
+  const chart = (spec: LoadChartSpec) => <LoadChart key={spec.title} base={d} spec={spec} onError={onError} />;
   const mb = (n: number) => `${Math.round(n)} MB`;
   const mbit = (n: number) => `${n >= 10 ? n.toFixed(0) : n.toFixed(1)} Mbps`;
   const whole = (n: number) => count(Math.round(n));
@@ -888,31 +936,15 @@ function SystemLoadBody({ d, onZoom }: { d: SystemLoad; onZoom: (from: number, t
           sub={sentPeak && sentPeak.v > 0 ? `Averaged over ${Math.round(d.stepMs / 60_000)} min${at(sentPeak)}` : "No upload was recorded in this period"} />
       </div>
       <div className="charts">
-        <ChartCard title="CPU usage" sub="Share of all cores, averaged over each step" series={cpu} table={table(cpu, pctText)}>
-          <Lines rows={rows} series={cpu} from={d.from} to={d.to} onZoom={onZoom} max={100} fmt={pctText} axisFmt={(n) => `${n}%`} />
-        </ChartCard>
-        <ChartCard title="Memory usage, machine" sub={`Share of ${memGb} GB in use`} series={one("mem", "Machine")}
-          table={table(one("mem", "Machine"), pctText)}>
-          <Lines rows={rows} series={one("mem", "Machine")} from={d.from} to={d.to} onZoom={onZoom} max={100} fmt={pctText} axisFmt={(n) => `${n}%`} />
-        </ChartCard>
-        <ChartCard title="Memory usage, bot process" sub="Resident memory, at most in each step" series={one("rss", "Bot process", COLORS[1])}
-          table={table(one("rss", "Bot process", COLORS[1]), mb)}>
-          <Lines rows={rows} series={one("rss", "Bot process", COLORS[1])} from={d.from} to={d.to} onZoom={onZoom} fmt={mb} />
-        </ChartCard>
-        <ChartCard title="Streams and viewers" sub="At most in each step" series={work} table={table(work, whole)}>
-          <Lines rows={rows} series={work} from={d.from} to={d.to} onZoom={onZoom} fmt={whole} curve="stepAfter" />
-        </ChartCard>
-        <ChartCard title="Server upload" sub="All data the bot's port sent, averaged over each step" series={one("sent", "Upload")}
-          table={table(one("sent", "Upload"), mbit)}>
-          <Lines rows={rows} series={one("sent", "Upload")} from={d.from} to={d.to} onZoom={onZoom} fmt={mbit} axisFmt={(n) => `${count(n)} Mbps`} />
-        </ChartCard>
-        {hasLoad && (
-          <ChartCard title="Load average" sub={`One-minute load average; the dashed line marks the number of cores (${d.cores})`}
-            series={one("load", "Load average")} table={table(one("load", "Load average"), (n) => n.toFixed(2))}>
-            <Lines rows={rows} series={one("load", "Load average")} from={d.from} to={d.to} onZoom={onZoom} fmt={(n) => n.toFixed(2)} axisFmt={count}
-              threshold={{ value: d.cores, label: `${d.cores} cores` }} />
-          </ChartCard>
-        )}
+        {chart({ title: "CPU usage", sub: "Share of all cores, averaged over each step", series: cpu, fmt: pctText, max: 100, axisFmt: (n) => `${n}%` })}
+        {chart({ title: "Memory usage, machine", sub: `Share of ${memGb} GB in use`, series: one("mem", "Machine"), fmt: pctText, max: 100,
+          axisFmt: (n) => `${n}%` })}
+        {chart({ title: "Memory usage, bot process", sub: "Resident memory, at most in each step", series: one("rss", "Bot process", COLORS[1]), fmt: mb })}
+        {chart({ title: "Streams and viewers", sub: "At most in each step", series: work, fmt: whole, curve: "stepAfter" })}
+        {chart({ title: "Server upload", sub: "All data the bot's port sent, averaged over each step", series: one("sent", "Upload"), fmt: mbit,
+          axisFmt: (n) => `${count(n)} Mbps` })}
+        {hasLoad && chart({ title: "Load average", sub: `One-minute load average; the dashed line marks the number of cores (${d.cores})`,
+          series: one("load", "Load average"), fmt: (n) => n.toFixed(2), axisFmt: count, threshold: { value: d.cores, label: `${d.cores} cores` } })}
       </div>
     </>
   );

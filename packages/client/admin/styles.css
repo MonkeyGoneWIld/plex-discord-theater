@@ -830,7 +830,7 @@ a.fact, .fact a { color: var(--accent); }
 }
 .tl-hover-line { position: absolute; top: 0; bottom: 0; width: 1px; margin-left: -0.5px; background: var(--text); opacity: .6; pointer-events: none; z-index: 4; }
 .tl-tip {
-  position: absolute; z-index: 5; pointer-events: none; background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+  position: absolute; z-index: 7; pointer-events: none; background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
   padding: 10px 12px; font-size: 12.5px; line-height: 1.4; box-shadow: 0 8px 24px rgba(0, 0, 0, .28);
 }
 .tl-tip.docked { position: static; margin-top: 12px; box-shadow: none; pointer-events: auto; }

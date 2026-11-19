@@ -96,7 +96,8 @@ are active.
    Discord app on a phone, Vesktop, or a browser, with the operating system),
    status, stream, sync offset from the session position to a hundredth of a
    second (as the player's Stats show it), buffer in seconds
-   with its trend (amber under 10 seconds), watch time, data received with
+   with its trend over the last 10 minutes on the timeline's 0 to 150 second
+   scale (amber under 10 seconds), watch time, data received with
    its split, data sent to peers, and buffering. Status is the player's last
    report: watching, loading (at the start or after a seek), buffering and
    for how long, out of sync (more than 2 seconds from the session
@@ -207,11 +208,12 @@ cause in another. For a long session, **Whole session**, **Last 30 min** and
 Each section's colour key is under its own rows.
 
 Hover over or tap the chart for a line across every row and the values at
-that moment, in sections: **Events** near that moment, each with the mark it
-has on the chart and the one under the pointer highlighted; **Session**
-(playback and the position); **Streams**; **Data delivered** by source and
-the required bitrate; and **Viewers** (each viewer's role, status, stream,
-sync offset, buffer and dropped frames). On a phone the readout sits under the chart, each viewer on two
+that moment, in sections: **Session** (playback and the position);
+**Streams**; **Data delivered** by source and the required bitrate;
+**Viewers** (each viewer's role, status, stream, sync offset, buffer and
+dropped frames); and **Events** near that moment, each with the mark it has
+on the chart and the one under the pointer highlighted. The readout keeps
+its place while the pointer moves along a row. On a phone the readout sits under the chart, each viewer on two
 lines. Hover any bar, line or mark for its details. Where labels would
 overlap, as on a phone, some are left to their mark's hover.
 

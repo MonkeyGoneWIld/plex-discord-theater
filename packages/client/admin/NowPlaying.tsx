@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { Client, Overview, PlayDetail, Room, Stream } from "./types";
 import { api } from "./api";
-import { drift, SessionTimeline } from "./timeline";
+import { BUFFER_TOP_S, drift, SessionTimeline } from "./timeline";
 import { ago, bytes, clock, dayTime, duration, quality, rate, seconds, zoneLabel } from "./format";
 import { BlockHead, BufferingCell, bufferingTone, DataCell, DecisionBadge, decisionOf, PlaceName } from "./parts";
 import { switchedText, trackName } from "./events";
@@ -127,6 +127,7 @@ function SyncCell({ c }: { c: Client }) {
   return <span className={off ? "warn-text" : ""}>{drift(p.driftS)}</span>;
 }
 
+/** The buffer in seconds, and its trend on the scale of the timeline's Buffer lane (0 to 150 seconds). */
 function AheadCell({ c }: { c: Client }) {
   const p = c.player;
   if (typeof p?.aheadS !== "number") return <span className="muted">—</span>;
@@ -134,7 +135,7 @@ function AheadCell({ c }: { c: Client }) {
   return (
     <span className="ahead-cell">
       <span className={p.aheadS < 10 ? "warn-text" : ""}>{seconds(p.aheadS)}</span>
-      {values.length > 1 && <Spark values={values} height={18} />}
+      {values.length > 1 && <Spark values={values} height={18} top={BUFFER_TOP_S} />}
     </span>
   );
 }

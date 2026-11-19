@@ -142,7 +142,7 @@ function linePath(points: Array<[number, number | null]>, x: (t: number) => numb
 }
 
 /** The most a player holds ahead: the peer-to-peer engine fetches 150 seconds ahead (Player.tsx, lib/bufferAhead). */
-const BUFFER_TOP_S = 150;
+export const BUFFER_TOP_S = 150;
 const BUFFER_LEVELS = [0, 30, 60, 90, 120, 150];
 
 /** A rounded top for a measure's scale: 1, 2, 2.5 or 5 times a power of ten. */
@@ -196,12 +196,14 @@ export function SessionTimeline({ data, durationS, ctx, live = false }: {
   const [range, setRange] = useState<Range>(() => (live && endAll - startAll > 30 * MIN * 1.25 ? "30" : "all"));
   const [eachViewer, setEachViewer] = useState(false);
   const [hover, setHover] = useState<Hover | null>(null);
-  // The readout's height, for keeping it on screen.
+  // The readout's height, for keeping it on screen: the tallest it has been while the pointer is on the chart,
+  // so it does not jump up and down as events come and go.
   const tipRef = useRef<HTMLDivElement>(null);
   const [tipH, setTipH] = useState(0);
   useLayoutEffect(() => {
+    if (!hover) { if (tipH) setTipH(0); return; }
     const h = tipRef.current?.offsetHeight ?? 0;
-    if (h && h !== tipH) setTipH(h);
+    if (h > tipH) setTipH(h);
   });
   const win = offered.find((r) => r.key === range) ?? RANGES[0];
   const w0 = win.ms === Infinity ? startAll : Math.max(startAll, endAll - win.ms);
@@ -495,23 +497,6 @@ export function SessionTimeline({ data, durationS, ctx, live = false }: {
     return (
       <>
         <div className="tl-tip-head"><strong>{timeOfDay(t)}</strong></div>
-        {(near.length > 0 || nearSteps.length > 0) && (
-          <section className="tl-tip-sec">
-            <h5>Events</h5>
-            <ul className="tl-tip-events">
-              {near.map((e) => (
-                <li key={e.id} className={isHere(off(e)) ? "here" : undefined}>
-                  <span className={`tl-key ${markOf(e)}`} /><span className="mono muted">{shortTime(e.at)}</span><span>{eventText(e, ctx)}</span>
-                </li>
-              ))}
-              {nearSteps.map((s2) => (
-                <li key={`p${s2.id}`} className={isHere(Math.abs(s2.at - t)) ? "here" : undefined}>
-                  <span className={`tl-key tick${s2.ok ? "" : " bad"}`} /><span className="mono muted">{shortTime(s2.at)}</span><span>{stepText(s2)}</span>
-                </li>
-              ))}
-            </ul>
-          </section>
-        )}
         <section className="tl-tip-sec">
           <h5>Session</h5>
           <dl className="tl-tip-grid">
@@ -599,6 +584,23 @@ export function SessionTimeline({ data, durationS, ctx, live = false }: {
             );
           })()}
         </section>
+        {(near.length > 0 || nearSteps.length > 0) && (
+          <section className="tl-tip-sec">
+            <h5>Events</h5>
+            <ul className="tl-tip-events">
+              {near.map((e) => (
+                <li key={e.id} className={isHere(off(e)) ? "here" : undefined}>
+                  <span className={`tl-key ${markOf(e)}`} /><span className="mono muted">{shortTime(e.at)}</span><span>{eventText(e, ctx)}</span>
+                </li>
+              ))}
+              {nearSteps.map((s2) => (
+                <li key={`p${s2.id}`} className={isHere(Math.abs(s2.at - t)) ? "here" : undefined}>
+                  <span className={`tl-key tick${s2.ok ? "" : " bad"}`} /><span className="mono muted">{shortTime(s2.at)}</span><span>{stepText(s2)}</span>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
       </>
     );
   };

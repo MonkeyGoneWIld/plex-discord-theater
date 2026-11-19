@@ -161,10 +161,16 @@ export function FlowChart({ points, requiredBps, height = 150, stepS = 10, axis,
 }
 
 /** A line of a few numbers over time, with no axes: a tile's trend. */
-export function Spark({ values, color = "var(--series-1)", height = 28 }: { values: number[]; color?: string; height?: number }) {
+export function Spark({ values, color = "var(--series-1)", height = 28, top }: {
+  values: number[];
+  color?: string;
+  height?: number;
+  /** A fixed top for the scale (values above it are drawn at it); else from the values. */
+  top?: number;
+}) {
   if (values.length < 2) return <div className="spark" style={{ height }} />;
-  const max = Math.max(1, ...values) * 1.1;
-  const pts = values.map((v, i) => `${((i / (values.length - 1)) * 100).toFixed(1)},${(height - (v / max) * height).toFixed(1)}`);
+  const max = top ?? Math.max(1, ...values) * 1.1;
+  const pts = values.map((v, i) => `${((i / (values.length - 1)) * 100).toFixed(1)},${(height - (Math.min(v, max) / max) * height).toFixed(1)}`);
   return (
     <svg className="spark" viewBox={`0 0 100 ${height}`} preserveAspectRatio="none" style={{ height }} aria-hidden="true">
       <path d={`M0,${height} L${pts.join(" L")} L100,${height} Z`} fill={color} opacity="0.18" />
